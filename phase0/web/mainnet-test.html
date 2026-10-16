@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>ZecRescue Phase 0 — Mainnet EIP-3009 Test</title>
+    <style>
+      :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; background: #101315; color: #e8ecec; }
+      body { max-width: 900px; margin: 0 auto; padding: 24px; }
+      h1 { font-size: 1.7rem; margin-bottom: .3rem; }
+      h2 { font-size: 1.1rem; margin: 1.4rem 0 .7rem; }
+      p, li { line-height: 1.5; color: #c5cecc; }
+      .warning { border: 1px solid #d09946; background: #2b2418; padding: 12px 14px; border-radius: 8px; }
+      .card { border: 1px solid #37413f; border-radius: 10px; padding: 16px; margin: 14px 0; background: #171c1d; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(235px, 1fr)); gap: 12px; }
+      label { display: block; font-size: .85rem; color: #b4c0bd; margin-bottom: 5px; }
+      input, select, button { font: inherit; border-radius: 6px; border: 1px solid #56615e; padding: 9px 10px; background: #101516; color: #f3f5f4; width: 100%; box-sizing: border-box; }
+      button { width: auto; margin: 6px 8px 0 0; cursor: pointer; background: #24483c; border-color: #4b826e; }
+      button:disabled { cursor: not-allowed; opacity: .45; }
+      button.secondary { background: #283033; border-color: #596261; }
+      button.danger { background: #65372b; border-color: #a56049; }
+      code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+      pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .82rem; background: #0c1011; border-radius: 6px; padding: 12px; max-height: 420px; overflow: auto; }
+      #status { min-height: 1.5rem; color: #a9d8bc; }
+      .small { font-size: .84rem; color: #aeb8b6; }
+    </style>
+  </head>
+  <body>
+    <h1>Phase 0 mainnet micro-test</h1>
+    <p class="warning"><strong>Real mainnet USDC transfer.</strong> This spike is not a product UI. Base is enabled for the first test. Nothing signs or broadcasts automatically; the runner never receives a private key, seed phrase, or signature.</p>
+
+    <section class="card">
+      <h2>1. Select and connect</h2>
+      <div class="grid">
+        <div>
+          <label for="chain">Mainnet chain</label>
+          <select id="chain"></select>
+        </div>
+        <div>
+          <label for="amount">Test amount (USDC, 0.000001–0.05)</label>
+          <input id="amount" inputmode="decimal" value="0.01" autocomplete="off">
+        </div>
+      </div>
+      <p><button id="connect">Connect victim wallet</button><span id="victim-connected" class="small">Not connected</span></p>
+      <div class="grid">
+        <div><label for="destination">Destination EOA (your clean disposable test wallet)</label><input id="destination" placeholder="0x…" autocomplete="off" spellcheck="false"></div>
+        <div><label for="relayer">Separate relayer EOA</label><input id="relayer" placeholder="0x…" autocomplete="off" spellcheck="false"></div>
+      </div>
+      <p class="small">Victim, destination, and relayer must be three different addresses. The destination is the actual test transfer recipient, not a NEAR deposit address.</p>
+    </section>
+
+    <section class="card">
+      <h2>2. Preflight</h2>
+      <button id="dry-run" class="secondary">Dry run only</button>
+      <button id="prepare">Prepare authorization for signing</button>
+      <p class="small">Both actions validate mainnet chain ID, the configured native USDC contract and metadata, victim balance, destination EOA, unused random nonce, and an intentionally invalid-signature probe. Dry run stops before wallet signing. Exact signed-call simulation and gas estimate require the real authorization.</p>
+      <pre id="authorization-view">No authorization prepared.</pre>
+    </section>
+
+    <section class="card">
+      <h2>3. User signature and relayer submission</h2>
+      <button id="sign" disabled>Sign EIP-712 authorization as victim</button>
+      <button id="submit" class="danger" disabled>Submit from relayer wallet</button>
+      <button id="replay" class="secondary" disabled>Verify replay rejection</button>
+      <p class="small">After signing, switch the connected wallet to the separate relayer account. The runner checks that account before simulating and submitting. The submit button shows a second explicit confirmation before opening the wallet transaction prompt.</p>
+    </section>
+
+    <section class="card">
+      <h2>Result</h2>
+      <div id="status" role="status" aria-live="polite">No transaction has been signed or broadcast.</div>
+      <pre id="result">No result.</pre>
+    </section>
+
+    <script type="module" src="/runner.js"></script>
+  </body>
+</html>

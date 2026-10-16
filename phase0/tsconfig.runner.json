@@ -1,0 +1,9 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "../dist/phase0-runner",
+    "noEmit": false
+  },
+  "include": ["scripts/mainnet-runner-server.ts", "src/mainnet-runner.ts"]
+}

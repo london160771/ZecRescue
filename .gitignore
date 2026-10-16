@@ -1,0 +1,28 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
+
+.DS_Store
+Thumbs.db
+
+# Local wallet / Zcash data
+.zcash/
+zallet-data/
+zebra-data/
+wallet-data/
+
+# Private keys / key material
+*.pem
+*.key
+*.keystore
+*.wallet
+
+# IDE / local settings
+.vscode/
+.idea/
+
+phase0/.private/
