@@ -58,9 +58,20 @@
 - **Implementation commit:** `8789c79` (`feat: orchestrate Base and Arbitrum rescue workflows`).
 - **Unresolved:** Live RPC/provider calls, user wallet connection, and Phase 0 funded final validation remain outside this code-only phase.
 
-## Phases 5–6
+## Phase 5 — Production hardening
 
-Phase 5 is next. Each phase will be recorded and committed separately after its implementation, checks, security/privacy review, and major checkpoint.
+**Status:** Implemented and locally verified. Mainnet deployment and production reimbursement calibration are deliberately not claimed.
+
+- **Implementation:** Added a minimal `RescueRouter` that uses Circle `receiveWithAuthorization` plus a second owner-signed, chain/router-specific EIP-712 route consent. It binds the exact native USDC token, total amount, NEAR deposit, relayer, fixed reimbursement, 300-second window, and both nonces. It reimburses and forwards the exact remainder atomically. The contract has no owner, upgrade, arbitrary call, or sweep. The server verifies router code hash/token/TTL, quote and signature bindings, both nonce states, exact simulation, minimum rescue amount, configured reimbursement and gas ceilings, and a 2x relayer balance reserve. Base gas estimates include OP Stack L1-data/operator estimates with headroom; Arbitrum uses the network's combined estimate. Base receipt gas is recorded only if L1 fee data is returned. Added a Mongo-backed hashed-key rate-limit store and tighter signature, request, and quote-expiry checks.
+- **Privacy/security:** Signatures are request-only and never persisted. Mongo adds only the signed route parameters and estimated gas accounting; no Zcash wallet identity or keys are added. A regression now rejects a signature window more than 300 seconds ahead, even if its duration is short. No contract was deployed and no RPC write, wallet signature, or real token movement occurred.
+- **Verification:** `npm test` — 45 passed (13 files); `npm run typecheck` — passed; `npm run lint` — passed; `npm run build:api` — passed; `npm run build:agent` — passed; `npm run build:contracts` — compiled all three Solidity artifacts; `npm audit --offline` — 0 vulnerabilities; `git diff --check` — passed. The Solidity suite runs locally in an in-memory EthereumJS EVM with an explicitly test-only EIP-3009 mock token; this does not prove a deployment or mainnet behavior.
+- **Major adversarial review:** Reviewed signer and dual-consent binding, quote destination, chain/router code pinning, nonce replay, maximum authorization age, caller identity, reentrancy, transfer rollback, stale quote invalidation, relayer separation/reserve, bounded fixed reimbursement, API rate limits, and Mongo allowlists. Corrected future-dated authorization acceptance and included Base rollup fee components in the gas ceiling. No custodial or arbitrary redirect path exists in the tested router.
+- **Unresolved:** Reimbursement is still a fixed USDC amount signed by the user; it is not an on-chain conversion of actual gas cost and may over/under-reimburse. Fee caps need a reviewed policy and calibration. Base OP Stack/Arbitrum estimates are code paths not live-validated here. Router source needs independent audit and explicit deployment approval; API fails closed without deployment configuration. Local Zcash detection/shielding remains disabled pending a verified programmable wallet API and funded validation.
+- **Commit:** `81fa1c5d739e424df208c727eb376bd3e5bb5e42` (`feat: harden rescue routing and reimbursement`).
+
+## Phase 6 — UI and demo
+
+In progress. The interface must follow real API/agent states and preserve the Phase 0 funding gate. It must not claim an end-to-end rescue or shielding capability before those integrations are proven.
 
 ## Final validation state
 
