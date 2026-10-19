@@ -93,7 +93,9 @@ The reimbursement is presently a **fixed user-signed USDC amount**, not an on-ch
 
 ### Phase 6 — UI and demo
 
-Build the complete responsive user journey only after the engine and integrations exist. Mark demo/test data clearly. Never fake mainnet success. Show attacker-race and non-retroactive-privacy warnings, partial failures, review/refund/expiry states, and transaction links.
+Implemented as a responsive React/Vite user journey. Use wagmi only for the user's wallet connection and typed-data signatures; browser EVM RPC transports must remain disabled because reads and simulations belong to the API. Show Base and Arbitrum balances from the API, one quote/receiver/authorization per selected chain, the clean refund destination, provider fees/minimum/expiry, the full router/token/amount/reimbursement summary, and a second explicit confirmation before relayer submission. Signatures stay in tab memory and are cleared on address change, submission, or expiry. Poll and present provider and source transaction states independently. The local agent is contacted only through fixed loopback and must never be treated as an end-to-end Zcash proof while its capabilities are unverified. Mark all pending funded validation, attacker-race, partial failure, review/refund/expiry, and non-retroactive privacy states plainly. Never fabricate a successful chain or wallet result.
+
+The Vite development server proxies `/api` to the local API. A production Vercel build must define the public `VITE_API_BASE_URL` build variable with the Render API origin. It must never contain an RPC secret, relayer key, database URI, or provider secret. The UI health indicator validates the API response shape so a SPA fallback page cannot look like a healthy API.
 
 ## Deferred funded validation
 

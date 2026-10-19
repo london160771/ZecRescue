@@ -10,8 +10,21 @@ ZecRescue is a non-custodial emergency rescue tool. Locked V1 scope is native Ci
 - Phase 2 has not been verified against a live 1Click API in this environment. Unit fixtures are not live-provider proof.
 - Phase 3 adds the loopback-only `zecrescue-agent` and a fixed-command Zingolib CLI adapter. Its generated receiver and incoming-status behavior have not been exercised with the user's wallet in this environment. Shield/sign/broadcast/withdrawal are deliberately disabled pending proof of per-chain source isolation and the Ironwood destination.
 - Phase 4 combines Base and Arbitrum in one idempotent workflow with derived per-chain progress and explicit partial/failure/review states. Live RPC, provider, and wallet actions remain unverified.
-- There is no production frontend yet. Do not treat API unit tests as a live-chain proof.
+- Phase 5 adds a code-level RescueRouter and fixed, user-signed USDC reimbursement. The router is unaudited and undeployed; fixed reimbursement is not exact gas reimbursement.
+- Phase 6 provides a responsive React/Vite wallet workflow. EVM reads go through the API; signatures are requested from the user's wallet and held in tab memory until explicit relayer submission. The UI blocks unverified Zcash shielding and keeps funded validation visible.
 - No real-value transaction was signed or broadcast during Phases 1–6.
+
+## Frontend development
+
+The local Vite app runs at `http://127.0.0.1:5173`:
+
+```sh
+npm run dev:web
+```
+
+For full local operation, start the API separately and configure it with the local MongoDB URI and server-only settings described below. Vite proxies `/api` to `127.0.0.1:8787`. Production Vercel builds require the non-secret `VITE_API_BASE_URL` to point at the Render API origin. Never put RPC credentials or relayer keys in a `VITE_` variable. The browser wallet connector is used for address access and EIP-712 signing; browser EVM RPC transports intentionally reject reads, which remain server-side.
+
+The local agent is called only at the fixed loopback origin on port 4180. Its session token stays in browser memory and is sent only to loopback. Current unverified receive/shield operations remain visibly blocked; no demo state is represented as a mainnet result.
 
 ## Backend development
 

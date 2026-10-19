@@ -98,7 +98,7 @@ export const allowedLegTransitions: Record<LegStatus, readonly LegStatus[]> = {
   discovered: ["quoted", "failed"],
   quoted: ["awaiting_authorization", "quote_expired", "failed"],
   quote_expired: ["quoted", "failed"],
-  awaiting_authorization: ["submitting", "quote_expired", "failed"],
+  awaiting_authorization: ["submitting", "quoted", "quote_expired", "failed"],
   submitting: ["submitted", "needs_review", "failed"],
   submitted: ["source_confirmed", "needs_review", "failed"],
   source_confirmed: ["converting", "completed", "failed", "refunded"],

@@ -678,6 +678,10 @@ export class RescueService {
     let job = await this.getJob(jobId);
     for (const leg of job.legs) {
       let currentLeg = getLeg(job, leg.chainKey);
+      if (currentLeg.status === "awaiting_authorization") {
+        job = await this.refreshPreparedAuthorization(job, currentLeg);
+        currentLeg = getLeg(job, leg.chainKey);
+      }
       if (currentLeg.status === "submitted" && currentLeg.transactionHash) {
         job = await this.refreshSubmittedLeg(job, currentLeg);
       } else if (currentLeg.status === "submitting" ||
@@ -688,6 +692,37 @@ export class RescueService {
       job = await this.refreshIntentLeg(job, currentLeg);
     }
     return job;
+  }
+
+  private async refreshPreparedAuthorization(job: RescueJob, leg: RescueLeg): Promise<RescueJob> {
+    if (!leg.authorization || !leg.rescueRoute || !leg.intentQuote) return job;
+    if (quoteExpiry(leg.intentQuote).getTime() <= Date.now() + 15_000) {
+      return await this.repository.updateLeg(job.jobId, leg.chainKey, ["awaiting_authorization"], {
+        status: "quote_expired",
+        authorization: null,
+        rescueRoute: null,
+        destination: null,
+        amountBaseUnits: null,
+        preparedAtBlock: null,
+        estimatedRelayGasCostWei: null
+      }) ?? job;
+    }
+    try {
+      const block = await getPublicClient(leg.chainKey).getBlock({ blockTag: "latest" });
+      const authorization = restoreAuthorization(leg.authorization);
+      if (authorization.validBefore > block.timestamp + 15n) return job;
+      return await this.repository.updateLeg(job.jobId, leg.chainKey, ["awaiting_authorization"], {
+        status: "quoted",
+        authorization: null,
+        rescueRoute: null,
+        destination: getAddress(leg.intentQuote.depositAddress),
+        amountBaseUnits: leg.intentQuote.requestedAmountBaseUnits,
+        preparedAtBlock: null,
+        estimatedRelayGasCostWei: null
+      }) ?? job;
+    } catch {
+      return job;
+    }
   }
 
   private async refreshIntentLeg(job: RescueJob, leg: RescueLeg): Promise<RescueJob> {

@@ -39,7 +39,9 @@ describe("rescue job repository", () => {
     expect(await repository.updateLeg(job.jobId, "base", ["discovered"], { status: "quoted" })).toBeNull();
     const prepared = await repository.updateLeg(job.jobId, "base", ["quoted"], { status: "awaiting_authorization" });
     expect(prepared?.legs[0]?.status).toBe("awaiting_authorization");
-    await expect(repository.updateLeg(job.jobId, "base", ["awaiting_authorization"], { status: "completed" })).rejects.toThrow("Invalid rescue leg transition");
+    const refreshed = await repository.updateLeg(job.jobId, "base", ["awaiting_authorization"], { status: "quoted" });
+    expect(refreshed?.legs[0]?.status).toBe("quoted");
+    await expect(repository.updateLeg(job.jobId, "base", ["quoted"], { status: "completed" })).rejects.toThrow("Invalid rescue leg transition");
   });
 
   it("rejects duplicate source and idempotency-key job creation", async () => {

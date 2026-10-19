@@ -34,6 +34,8 @@ React, Vite, TypeScript, Tailwind, wagmi, viem. Frontend responsibilities:
 - show per-chain state, transaction links, Zcash receipt/shield status, partial failures, and honest warnings;
 - connect to local agent only for minimum capability/path/status/approval calls.
 
+Wagmi is configured for Base and Arbitrum wallet connection/signing only. Its browser RPC transports reject reads; balance, metadata, nonce, simulation, fee, and status reads go through the API. Vite proxies `/api` locally; production Vercel builds must set public `VITE_API_BASE_URL` to the Render API origin. Never place an RPC credential, relayer secret, database URI, or provider secret in a frontend build variable. EIP-712 signatures are held only in tab memory until the user explicitly confirms relayer submission, and are cleared on disconnect/address change, expiry, or submission.
+
 No hosted RPC credentials, relayer secret, wallet keys, or fabricated chain success may be sent to or embedded in the browser.
 
 ## 4. Backend services
@@ -128,7 +130,7 @@ Check relayer network balance, estimated gas and maximum allowed reimbursement b
 
 ## 11. User-visible states
 
-The UI should make the sequence legible: connected wallet, per-chain detected amount, clean refund address, quote/costs, exact EIP-712 summary, user signature, relayer submission, provider status, ZEC receive, shield approval, and final state.
+The Phase 6 UI implements the sequence: connected wallet, per-chain detected amount, clean refund address, quote/costs, exact token/router/amount/destination/reimbursement EIP-712 summary, user signature, explicit relayer submission, provider/source-chain status, and local Zcash capability/status. It intentionally blocks the claim or action of shield completion while the local wallet and Ironwood operation remain unverified.
 
 Display:
 

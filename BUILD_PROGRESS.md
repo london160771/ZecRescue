@@ -1,6 +1,6 @@
 # ZecRescue build progress
 
-**Current phase:** Phase 5 — Production hardening
+**Current phase:** Phase 6 — UI and demo (implementation complete)
 **Locked product scope:** Base + Arbitrum, native Circle USDC. Optimism deferred.
 **Safety gate:** No real-money signing, broadcasting, deployments, or funded tests during Phases 1–6 without explicit user approval.
 
@@ -71,7 +71,15 @@
 
 ## Phase 6 — UI and demo
 
-In progress. The interface must follow real API/agent states and preserve the Phase 0 funding gate. It must not claim an end-to-end rescue or shielding capability before those integrations are proven.
+**Status:** Implemented, verified, and ready for review. This does not mean the funded end-to-end product is validated.
+
+- **Implementation:** Added the responsive React/Vite/TypeScript/Tailwind application with Base and Arbitrum wallet connection, API-mediated balance scan, clean refund address, independent native-USDC quotes, recipient/minimum/fee/expiry display, exact authorization/reimbursement summary, both wallet signatures, explicit relayer confirmation, source/provider status tracking, explorer links, and partial/review/refund/error states. Added the local-agent capability boundary and separate per-chain transparent receiver entry. Unsupported Zcash receipt/shield capabilities remain blocked and visible. Added Vite local API proxy, Vercel build config, and public frontend config variables.
+- **Security/privacy:** Browser EVM transports reject RPC calls; all EVM reads and simulations stay server-side. The UI sends public wallet/quote fields to the API only as required by the flow. EIP-712 signatures stay in React memory until explicit submission and are cleared on disconnect/address change, expiry, and submit. Local-agent token is sent only to a validated loopback origin and not to hosted APIs. Health responses must identify both supported chains, preventing an HTML SPA fallback from appearing as API success. No secrets were found in the frontend/config changes; `.env` remains ignored. No wallet signature, transaction, provider deposit, deployment, or Zcash action was performed.
+- **Documentation:** Updated AGENTS.md, SPEC.md, DESIGN.md, README.md, and PHASE0_REPORT.md to describe the Phase 6 workflow and remaining blockers. Optimism remains deferred. Funded final Phase 0 validation remains pending.
+- **Verification:** `npm test` — 50 passed (14 files); `npm run typecheck` — passed; `npm run lint` — passed; `npm run build:web` — passed; `npm run build:api` — passed; `npm run build:agent` — passed; `npm run build:contracts` — compiled all 3 contracts; `npm audit --offline` — 0 vulnerabilities; `git diff --check` — passed. Desktop and narrow-screen preview reviewed. Local API was unavailable because no API/Mongo service was started, and the UI displayed that state without inferring success.
+- **Major adversarial review:** Checked chain scope, hidden browser RPC paths, typed-data amount/token/router/deposit/reimbursement display, wallet source binding, clear-on-address-change/expiry behavior, explicit submit modal, API/local-agent destinations, no local-key surface, no persistent signature path, no false shield completion, health fallback behavior, and truthfulness of funded-validation messaging. Fixed API health shape validation and stale authorization/quote refresh behavior. No unresolved UI-specific security defect found. Phase 5 router deployment/audit, fixed reimbursement calibration, live NEAR behavior, and local Ironwood shielding remain external/integration blockers documented in the Phase 0 report.
+- **Commit:** to be recorded after the phase commit.
+- **Unresolved:** Production front end requires `VITE_API_BASE_URL` set to the Render origin; API requires server-side Mongo/relayer/NEAR configuration. The RescueRouter is still unaudited and undeployed; fixed reimbursement does not equal actual gas. The current local Zcash adapter cannot claim receipt or shielding. No funded Base/Arbitrum conversion, ZEC receipt/shielding, or final E2E was performed. These require the separately approved post-Phase-6 funded validation.
 
 ## Final validation state
 
