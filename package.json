@@ -1,20 +1,32 @@
 {
-  "name": "zecrescue-phase0",
-  "version": "0.1.0",
+  "name": "zecrescue",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
+    "dev:api": "tsx server/src/main.ts",
+    "build:api": "tsc -p tsconfig.api.json",
+    "start:api": "node --env-file-if-exists=.env dist/server/src/main.js",
     "phase0:near-chain": "tsx phase0/scripts/near-chained-route.ts",
     "phase0:mainnet": "tsc -p phase0/tsconfig.runner.json && node --env-file-if-exists=.env dist/phase0-runner/scripts/mainnet-runner-server.js"
   },
   "dependencies": {
-    "viem": "2.37.9"
+    "express": "5.2.1",
+    "express-rate-limit": "8.7.1",
+    "helmet": "8.3.0",
+    "mongoose": "8.24.3",
+    "viem": "2.37.9",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@eslint/js": "9.35.0",
+    "@types/express": "5.0.6",
     "@types/node": "22.18.6",
     "eslint": "9.35.0",
     "tsx": "4.20.6",
