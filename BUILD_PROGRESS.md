@@ -1,6 +1,6 @@
 # ZecRescue build progress
 
-**Current phase:** Phase 2 — Cross-chain conversion, implementation complete; live provider verification pending
+**Current phase:** Phase 4 — Multi-chain orchestration
 **Locked product scope:** Base + Arbitrum, native Circle USDC. Optimism deferred.
 **Safety gate:** No real-money signing, broadcasting, deployments, or funded tests during Phases 1–6 without explicit user approval.
 
@@ -36,11 +36,19 @@
 
 ## Phase 3 — Zcash Recovery Vault
 
-**Status:** Next.
+**Status:** Code-level agent implementation complete with explicit capability blockers; live wallet integration and shielding remain unproven.
+
+- **Implementation:** Added a loopback-only `zecrescue-agent` with a random 256-bit pairing token, exact configured origin allowlist, loopback Host validation, bearer auth, strict JSON schemas, 8 KB body cap, rate limits, and fixed Zingolib CLI command invocation without a shell. Agent requires an existing non-empty `zingo-wallet.dat`, only uses Mainnet arguments, serializes wallet subprocess operations, strips `ZINGO_SEED`/unrelated environment values, and keeps receiver-to-chain path IDs in memory only. Implemented local transparent receive-path creation and exact-path coin inspection; no seed/key input or arbitrary RPC/command proxy exists.
+- **Capability gate:** Shield preparation, signing, broadcasting, Ironwood receiver claims, and withdrawals return explicit blocked/501 states. Source review found the current CLI help describes Ironwood quickshield while the implementation hardcodes the Orchard selector and consumes eligible transparent account outputs without selecting a source path. No operation is advertised as live-proven. Agent CLI response schemas and compatibility with the user's current Zingo PC wallet file are still unverified.
+- **Privacy/security:** Replaced the user's previously shared public `t1` address in an existing tracked test and new tests with synthetic checksummed test addresses. Agent never reads/displays recovery words and sends no wallet material to the hosted API. The user must close Zingo PC before configuring the agent against the same data directory to avoid concurrent wallet writes.
+- **Verification:** `npm test` — 32 passed; `npm run typecheck` — passed; `npm run lint` — passed; `npm run build:api` — passed; `npm run build:agent` — passed; `git diff --check` — passed. Tests use synthetic CLI output; these are not live Zcash proof. No Zingo CLI was configured and no wallet file was opened.
+- **Major review checkpoint:** Adversarial review covered localhost/DNS-rebinding boundary, origin and token checks, process argument injection, child environment inheritance, empty wallet auto-creation, address/path persistence, output parsing, concurrent CLI invocations, the Zingolib shield input scope, Ironwood terminology, and accidental inclusion of the public receiver. The current scope prevents key import, arbitrary command execution, wallet auto-creation, and unverified shielding/broadcast. No unresolved code-severity finding remains; the specific third-party behavior gaps are recorded as blockers.
+- **Implementation commit:** Pending.
+- **Unresolved:** Live CLI compatibility, coin-summary schema and sync evidence, and a verified source-isolated Ironwood shield + user approval/sign/broadcast flow. No funds moved.
 
 ## Phases 4–6
 
-Not started. Each phase will be recorded and committed separately after its implementation, checks, security/privacy review, and major checkpoint.
+Phase 4 is next. Each phase will be recorded and committed separately after its implementation, checks, security/privacy review, and major checkpoint.
 
 ## Final validation state
 

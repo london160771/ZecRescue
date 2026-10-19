@@ -47,12 +47,11 @@ Those funded validations are deliberately scheduled **after Phase 6**. Do not cl
 ## Local Zcash architecture
 
 ```text
-Web app → hosted API/orchestrator → loopback-only zecrescue-agent
-                                      → local light-wallet layer
-                                      → remote lightwalletd
+Web app → hosted API/orchestrator
+       ↘ loopback-only zecrescue-agent → local Zingo/Zingolib light wallet → remote lightwalletd
 ```
 
-The hosted app must never connect directly to a local wallet RPC. Keep local agent and wallet RPC bound to loopback. Generate receive paths locally and keep keys local. Expose the smallest explicit API needed for capabilities, receive-path creation, status polling, transaction preparation, local signing/approval, broadcast, and user-approved withdrawal. Do not invent Zallet/Zingo RPC calls or an `ironwood` selector. Follow the current wallet API terminology and verify the resulting pool.
+The hosted app must never connect directly to a local wallet RPC. Keep the local agent bound to `127.0.0.1`; require a high-entropy local bearer token and exact origin allowlist. Generate receive paths locally and keep keys local. Current implemented API surface is `GET /healthz`, `GET /v1/capabilities`, `POST /v1/receive-paths`, and `GET /v1/receive-paths/:pathId/status`. Shield preparation, local approval/signing, broadcast, and withdrawal routes must remain blocked until the wallet layer proves the exact operation. Never invent Zallet/Zingo RPC calls or an `ironwood` selector. Follow current wallet API terminology and verify the resulting pool.
 
 Use distinct temporary receiving paths for Base and Arbitrum. Do not intentionally merge them before shielding. Keep the path-to-chain association local whenever possible; any hosted transient receiver needed to form a quote must expire and be deleted after completion, refund, or expiry.
 
@@ -80,7 +79,7 @@ Implement NEAR Intents Base and Arbitrum USDC→ZEC quotes, quote expiry, deposi
 
 ### Phase 3 — Zcash Recovery Vault
 
-Build the light-client-based programmable local `zecrescue-agent` and wallet-layer bridge. Keep keys local; generate distinct receivers, detect funds, prepare and locally sign approved shielding/withdrawal transactions, broadcast through the supported lightwalletd path, and report status. Do not install a full node. If current public APIs cannot support an operation, expose a truthful unsupported/blocked state instead of a fake success.
+Build the light-client-based programmable local `zecrescue-agent` and wallet-layer bridge. Keep keys local; generate distinct receivers, detect funds, prepare and locally sign approved shielding/withdrawal transactions, broadcast through the supported lightwalletd path, and report status. Do not install a full node. Current CLI shielding documentation and source differ on the destination pool and shielding sweeps the account's eligible transparent funds; until resolved with the installed version and per-source isolation, the agent must report shielding/signing/broadcast as blocked. If current public APIs cannot support an operation, expose a truthful unsupported/blocked state instead of a fake success.
 
 ### Phase 4 — Multi-chain orchestration
 

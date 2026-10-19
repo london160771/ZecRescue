@@ -17,7 +17,7 @@ The full-node disk footprint is outside this project's machine constraints and i
 
 See [PHASE0_REPORT.md](PHASE0_REPORT.md) for the evidence classification and measured Zingo PC footprint. No wallet file, seed phrase, spending key, viewing key, or RPC credential should be shared. Keep wallet backup material offline and local.
 
-## Phase 3 target
+## Phase 3 implementation state
 
 ```text
 Web app → loopback-only zecrescue-agent
@@ -25,6 +25,8 @@ Web app → loopback-only zecrescue-agent
         → remote lightwalletd
 ```
 
-Zingo PC's GUI creation/sync flow does not prove a stable programmatic API. Before enabling any Zcash operation, pin a current supported Zingolib-compatible layer and prove locally: receiver creation, incoming detection, transaction preparation, local approval/signing, broadcast, and shielded-pool confirmation. Never proxy arbitrary wallet RPC to a hosted server. If the required library API cannot prove a step, keep that step disabled and report the blocker rather than simulating success.
+The repository now contains a loopback-only `zecrescue-agent` with a fixed-command Zingolib CLI adapter. It requires an existing `zingo-wallet.dat`, refuses to initialize a wallet, and keeps the path-to-chain association in memory. The user must close Zingo PC before the CLI uses the same directory. No live wallet connection was tested by this code change.
+
+Receiver generation and incoming status are available only when configured; the CLI response schema and installed-wallet compatibility remain unverified. The current public CLI documentation says quickshield targets Ironwood, but its current shield implementation source still uses an Orchard selector and consumes eligible transparent account outputs without selecting an individual source path. The agent therefore disables shield preparation, local signing, broadcast, Ironwood receiver claims, and withdrawals. Do not mark these operations complete until a wallet-layer build proves separate Base/Arbitrum inputs and the exact Ironwood destination. Never proxy arbitrary wallet RPC to a hosted server.
 
 Ironwood is the product's intended pool terminology. Follow the current wallet's actual API names and status; do not invent an `ironwood` RPC method or selector. Do not describe transparent receipts as private before shield completion.

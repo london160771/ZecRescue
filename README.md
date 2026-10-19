@@ -8,6 +8,7 @@ ZecRescue is a non-custodial emergency rescue tool. Locked V1 scope is native Ci
 - Phase 1 implements the EVM rescue API, short-lived EIP-3009 authorization preparation, relayer submission, and MongoDB orchestration state.
 - Phase 2 implements quote acquisition, signed-quote validation, quote-bound authorization preparation, provider status tracking, and sanitized quote metadata storage.
 - Phase 2 has not been verified against a live 1Click API in this environment. Unit fixtures are not live-provider proof.
+- Phase 3 adds the loopback-only `zecrescue-agent` and a fixed-command Zingolib CLI adapter. Its generated receiver and incoming-status behavior have not been exercised with the user's wallet in this environment. Shield/sign/broadcast/withdrawal are deliberately disabled pending proof of per-chain source isolation and the Ironwood destination.
 - There is no production frontend yet. Do not treat API unit tests as a live-chain proof.
 - No real-value transaction was signed or broadcast during Phases 1–6.
 
@@ -21,6 +22,16 @@ npm run dev:api
 ```
 
 The API listens on port `8787` by default. In production, set `WEB_ORIGIN` to the exact HTTPS frontend origin. EVM RPC overrides are server-side only; the backend uses public Base and Arbitrum endpoints when no override is configured.
+
+## Local Zcash agent
+
+See [`agent/README.md`](agent/README.md) before configuring the local companion. It binds only to `127.0.0.1:4180`, prints an ephemeral bearer token to its terminal, and requires an existing Zingo Mainnet wallet directory. Never share the token, wallet backup, or keys. The agent does not initialize wallets, and the user must close Zingo PC before connecting the CLI to the same wallet directory.
+
+```sh
+npm run dev:agent
+```
+
+The only enabled wallet operations are receiver creation and guarded incoming-status inspection. The shield/sign/broadcast/withdrawal API paths return a blocked response; this is intentional, not a successful Zcash integration.
 
 ## Phase 1 API
 

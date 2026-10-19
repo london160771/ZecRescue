@@ -11,8 +11,11 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "dev:api": "tsx server/src/main.ts",
+    "dev:agent": "tsx agent/src/main.ts",
     "build:api": "tsc -p tsconfig.api.json",
     "start:api": "node --env-file-if-exists=.env dist/server/src/main.js",
+    "build:agent": "tsc -p tsconfig.agent.json",
+    "start:agent": "node --env-file-if-exists=.env dist/agent/src/main.js",
     "phase0:near-chain": "tsx phase0/scripts/near-chained-route.ts",
     "phase0:mainnet": "tsc -p phase0/tsconfig.runner.json && node --env-file-if-exists=.env dist/phase0-runner/scripts/mainnet-runner-server.js"
   },

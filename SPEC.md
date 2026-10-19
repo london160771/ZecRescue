@@ -73,7 +73,7 @@ React app → hosted orchestrator → localhost zecrescue-agent
                                    → remote lightwalletd
 ```
 
-Required local capabilities:
+Required local capabilities (only expose an operation as enabled after its wallet/API behavior is verified):
 
 - wallet capability/version check;
 - create/derive a user-controlled receiving path locally;
@@ -84,6 +84,8 @@ Required local capabilities:
 - broadcast via supported light-client service;
 - report transaction and shielded-pool status;
 - prepare a user-approved withdrawal.
+
+The Phase 3 agent's current concrete API is `GET /healthz`, `GET /v1/capabilities`, `POST /v1/receive-paths`, and `GET /v1/receive-paths/:pathId/status`. It binds to `127.0.0.1`, uses a random local bearer token and exact origin allowlist, and never accepts key material or arbitrary RPC/CLI input. Shield preparation, signing, broadcast, Ironwood receiver claims, and withdrawals remain blocked in the current build because the available CLI source does not yet prove per-source input isolation and the Ironwood shield destination.
 
 Zcash keys remain on the user's machine. No seed phrase/private key import into the web app or hosted backend. Bind agent and wallet RPC to loopback, authenticate local callers where practical, use strict origin/CSRF protections, and expose a minimal allowlisted API.
 

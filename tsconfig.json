@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["node", "vitest/globals"]
   },
-  "include": ["phase0/**/*.ts", "server/**/*.ts", "vitest.config.ts", "eslint.config.js"]
+  "include": ["phase0/**/*.ts", "server/**/*.ts", "agent/**/*.ts", "vitest.config.ts", "eslint.config.js"]
 }

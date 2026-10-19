@@ -19,7 +19,7 @@ Browser (React/Vite)
                               └── remote lightwalletd
 ```
 
-The hosted API never connects to Zallet RPC, never receives Zcash keys, and never retains Recovery Vault identity. The agent is bound to loopback. No Zebra, zecd, or full node is installed or required. Zingo PC is the Phase 0 proof candidate; its GUI success is not proof of a programmatic API. Phase 3 must validate the exact supported wallet library/API before implementing a bridge.
+The hosted API never connects to Zallet RPC, never receives Zcash keys, and never retains Recovery Vault identity. The agent is bound to loopback. No Zebra, zecd, or full node is installed or required. Zingo PC is the Phase 0 proof candidate; its GUI success is not proof of a programmatic API. The current code adds a Zingolib CLI adapter, but a live wallet has not been configured or exercised by it.
 
 ## 3. Frontend
 
@@ -73,19 +73,16 @@ Persist quote ID/expiry/deposit data only for the operational period. Do not put
 
 ## 7. Local Zcash agent
 
-The agent owns the only interface to the local light wallet. Planned allowlisted API:
+The agent owns the only interface to the local light wallet. Implemented allowlisted API:
 
-- `GET /health` and `GET /capabilities`;
-- `POST /v1/receivers` to create a fresh local per-leg receiver and return only the public receiver plus ephemeral handle;
-- `GET /v1/receivers/:handle/status` to report incoming amount/confirmations and shield status;
-- `POST /v1/shields/prepare` to prepare a shield transaction for local display;
-- `POST /v1/shields/:id/approve` to require local approval/sign/broadcast;
-- `GET /v1/transactions/:id` for confirmation state;
-- an explicit user-approved withdrawal preparation/approval path.
+- `GET /healthz` and `GET /v1/capabilities`;
+- `POST /v1/receive-paths` to create a fresh transparent per-leg receiver and return a public address plus ephemeral handle;
+- `GET /v1/receive-paths/:pathId/status` to inspect only that local receiver's incoming amount after light-client sync;
+- `POST /v1/shielding/prepare`, local approval, exact transaction broadcast, and withdrawal preparation routes exist as explicit `501` blockers.
 
-The actual endpoints and wallet calls must follow the library available at implementation time; this is an allowlisted target, not an assertion that Zingo exposes these methods. Agent applies loopback binding, origin allowlist, unpredictable local pairing token or equivalent, request-size limits, strict schemas, no arbitrary JSON-RPC proxy, no remote key export, and no logging of receivers/keys. Browser CORS/CSRF behavior must be tested against local and hosted origins.
+The service requires a random local bearer token, exact browser-origin allowlist, valid loopback host, strict schemas, request-size limits, and a fixed CLI command allowlist. It never accepts arbitrary JSON-RPC or key material. The token remains in the local browser session and is never sent to the hosted API. The path ID to receiver association is process-memory only. The local service uses the existing wallet only when `zingo-wallet.dat` is present, and refuses to initialize a wallet. The user must close Zingo PC before opening the same wallet directory through CLI to avoid concurrent writers.
 
-Use a light-client wallet layer connected to remote lightwalletd. Generate receivers and sign locally. Monitor by wallet's supported scan/status APIs. Build and broadcast only through APIs proven to work; mark unsupported capability clearly.
+The current Zingolib command output schema and installed-wallet compatibility have not been proven live. More importantly, public CLI help describes quick shielding into Ironwood, while the current source's shield proposal hardcodes the Orchard selector and consumes eligible transparent wallet outputs without selecting a source path. Therefore generate/monitor code is conservative and signing, shielding, broadcast, and withdrawal stay disabled until a per-source, Ironwood-targeted operation is verified. A status error or unknown schema must never be rendered as “no funds received.”
 
 ## 8. Data model
 
