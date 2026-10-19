@@ -3,7 +3,9 @@ import { createServer, type IncomingMessage } from "node:http";
 import { join, resolve, sep } from "node:path";
 import {
   createPublicClient,
+  decodeFunctionData,
   encodeFunctionData,
+  fallback,
   http,
   isAddress,
   isHash,
@@ -12,6 +14,7 @@ import {
   type Hex
 } from "viem";
 import {
+  assessReplayProof,
   AUTHORIZATION_LIFETIME_SECONDS,
   AUTHORIZATION_START_GRACE_SECONDS,
   DEFAULT_TEST_AMOUNT,
@@ -21,6 +24,7 @@ import {
   newAuthorizationNonce,
   parseDistinctAddresses,
   parseTinyUsdcAmount,
+  rpcUrlsForChain,
   transferAuthorizationSelector,
   type MainnetChainKey
 } from "../src/mainnet-runner.js";
@@ -43,6 +47,18 @@ const transferEventAbi = [
   }
 ] as const;
 
+const authorizationUsedEventAbi = [
+  {
+    type: "event",
+    name: "AuthorizationUsed",
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: "authorizer", type: "address" },
+      { indexed: true, name: "nonce", type: "bytes32" }
+    ]
+  }
+] as const;
+
 const selector = transferAuthorizationSelector();
 const eip3009TypeProbe = "transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)";
 if (selector.length !== 10 || !eip3009TypeProbe.startsWith("transferWithAuthorization")) {
@@ -52,14 +68,30 @@ if (selector.length !== 10 || !eip3009TypeProbe.startsWith("transferWithAuthoriz
 type JsonRecord = Record<string, unknown>;
 
 function isChainKey(value: unknown): value is MainnetChainKey {
-  return value === "base" || value === "arbitrum" || value === "optimism";
+  return value === "base" || value === "arbitrum";
 }
 
 function publicClient(chainKey: MainnetChainKey) {
-  const config = MAINNET_CHAINS[chainKey];
+  const transports = rpcUrlsForChain(chainKey).map((url) => http(url, { timeout: 15_000, retryCount: 0 }));
   return createPublicClient({
-    transport: http(config.rpcUrl, { timeout: 15_000, retryCount: 1 })
+    transport: transports.length === 1 ? transports[0]! : fallback(transports, { rank: false })
   });
+}
+
+function safeErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : "Request failed";
+  if (/fetch failed|http request failed|timed? out|network|socket|econn|enotfound|eai_again/i.test(message)) {
+    return "Local EVM RPC request failed. Check BASE_RPC_URL (if set) and network connectivity. RPC endpoints are kept server-side.";
+  }
+  return message
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "[RPC endpoint]")
+    .replace(/0x[0-9a-fA-F]{64,}/g, "[redacted hex]");
+}
+
+function requireCalldata(record: JsonRecord): Hex {
+  const value = requireString(record, "calldata");
+  if (!/^0x[0-9a-fA-F]{584}$/.test(value)) throw new Error("calldata must be one encoded EIP-3009 transferWithAuthorization call");
+  return value as Hex;
 }
 
 function json(res: import("node:http").ServerResponse, status: number, value: unknown): void {
@@ -103,20 +135,35 @@ function containsEvmRevert(error: unknown): boolean {
   return false;
 }
 
+function isConsumedAuthorizationNonceRevert(error: unknown): boolean {
+  const visited = new Set<object>();
+  const messages: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current && typeof current === "object" && !visited.has(current); depth += 1) {
+    visited.add(current);
+    const item = current as { message?: unknown; shortMessage?: unknown; details?: unknown; reason?: unknown; cause?: unknown };
+    for (const value of [item.message, item.shortMessage, item.details, item.reason]) {
+      if (typeof value === "string") messages.push(value);
+    }
+    current = item.cause;
+  }
+  return /authorization(?:\s+nonce)?\s+(?:is|was|has been)\s+(?:used|consumed)(?:\s+or\s+canceled)?|authorization.{0,48}(?:used|consumed|canceled)|nonce.{0,48}(?:used|consumed)/i.test(messages.join(" "));
+}
+
 function broadcastGate(chainKey: MainnetChainKey): { enabled: boolean; reason: string } {
   if (chainKey === "base") return { enabled: true, reason: "Base is the only chain enabled for the first micro-test." };
   const basePass = process.env.PHASE0_BASE_MAINNET_PASS === "1";
-  const explicitEnable = process.env.PHASE0_ENABLE_NON_BASE === "1";
-  if (basePass && explicitEnable) return { enabled: true, reason: "Non-Base broadcasting was explicitly enabled after a recorded Base pass." };
+  const explicitEnable = process.env.PHASE0_ENABLE_ARBITRUM === "1";
+  if (basePass && explicitEnable) return { enabled: true, reason: "Arbitrum broadcasting was explicitly enabled after a recorded Base pass." };
   return {
     enabled: false,
-    reason: "Dry-run only until Base has passed and both PHASE0_BASE_MAINNET_PASS=1 and PHASE0_ENABLE_NON_BASE=1 are set."
+    reason: "Dry-run only until Base has passed and both PHASE0_BASE_MAINNET_PASS=1 and PHASE0_ENABLE_ARBITRUM=1 are set."
   };
 }
 
 async function handlePreflight(body: JsonRecord): Promise<unknown> {
   const chainKey = body.chainKey;
-  if (!isChainKey(chainKey)) throw new Error("chainKey must be base, arbitrum, or optimism");
+  if (!isChainKey(chainKey)) throw new Error("chainKey must be base or arbitrum; optimism is deferred");
   const chain = MAINNET_CHAINS[chainKey];
   const { victim, destination, relayer } = parseDistinctAddresses(
     requireString(body, "victim"),
@@ -243,9 +290,89 @@ async function handlePreflight(body: JsonRecord): Promise<unknown> {
   };
 }
 
+async function handleSubmissionCheck(body: JsonRecord): Promise<unknown> {
+  const chainKey = body.chainKey;
+  if (!isChainKey(chainKey)) throw new Error("chainKey must be base or arbitrum; optimism is deferred");
+  const chain = MAINNET_CHAINS[chainKey];
+  const { victim, destination, relayer } = parseDistinctAddresses(
+    requireString(body, "victim"),
+    requireString(body, "destination"),
+    requireString(body, "relayer")
+  );
+  const amount = BigInt(requireString(body, "amountBaseUnits"));
+  if (amount <= 0n || amount > 50_000n) throw new Error("amountBaseUnits is outside the micro-test limit");
+  const nonce = requireString(body, "nonce") as Hex;
+  if (!/^0x[0-9a-fA-F]{64}$/.test(nonce)) throw new Error("nonce must be 32 bytes");
+  const calldata = requireCalldata(body);
+  const decoded = decodeFunctionData({ abi: eip3009Abi, data: calldata });
+  if (decoded.functionName !== "transferWithAuthorization") throw new Error("calldata is not an EIP-3009 transferWithAuthorization call");
+  const [from, to, value, validAfter, validBefore, signedNonce] = decoded.args;
+  if (
+    from.toLowerCase() !== victim.toLowerCase() ||
+    to.toLowerCase() !== destination.toLowerCase() ||
+    value !== amount ||
+    signedNonce.toLowerCase() !== nonce.toLowerCase()
+  ) {
+    throw new Error("Signed calldata does not match the selected victim, destination, amount, and nonce");
+  }
+
+  const client = publicClient(chainKey);
+  const [chainId, latestBlock, nonceUsed, victimNative, relayerNative] = await Promise.all([
+    client.getChainId(),
+    client.getBlock({ blockTag: "latest" }),
+    client.readContract({ address: chain.usdc, abi: eip3009Abi, functionName: "authorizationState", args: [victim, nonce as Hex] }),
+    client.getBalance({ address: victim }),
+    client.getBalance({ address: relayer })
+  ]);
+  if (chainId !== chain.chainId) throw new Error(`RPC chain ID mismatch: expected ${chain.chainId}, got ${chainId}`);
+  if (validAfter > latestBlock.timestamp || validBefore <= latestBlock.timestamp || validBefore <= validAfter) {
+    throw new Error("Signed authorization is not currently within its validity window");
+  }
+  if (validBefore - validAfter > AUTHORIZATION_LIFETIME_SECONDS + AUTHORIZATION_START_GRACE_SECONDS) {
+    throw new Error("Signed authorization validity window exceeds the Phase 0 limit");
+  }
+  if (nonceUsed) throw new Error("Authorization nonce is already used");
+
+  const [estimatedGas, gasPrice] = await Promise.all([
+    client.estimateGas({ account: relayer, to: chain.usdc, data: calldata }),
+    client.getGasPrice()
+  ]);
+  await client.call({ account: relayer, to: chain.usdc, data: calldata });
+  const feeCushion = estimatedGas * gasPrice * 2n;
+  if (relayerNative < feeCushion) {
+    throw new Error(`Relayer native balance ${relayerNative} is below the 2x estimated fee cushion ${feeCushion}`);
+  }
+
+  return {
+    chain: { key: chain.key, name: chain.name, chainId },
+    authorization: {
+      from,
+      to,
+      value: value.toString(),
+      nonce: signedNonce,
+      validAfter: validAfter.toString(),
+      validBefore: validBefore.toString(),
+      nonceUnused: true,
+      signatureSimulationPassed: true
+    },
+    gas: {
+      estimatedUnits: estimatedGas.toString(),
+      gasPriceWei: gasPrice.toString(),
+      estimatedFeeWei: (estimatedGas * gasPrice).toString(),
+      requiredBalanceCushionWei: feeCushion.toString()
+    },
+    balancesBefore: {
+      victimNative: victimNative.toString(),
+      relayerNative: relayerNative.toString()
+    },
+    signatureReceivedByLocalRunnerForSimulation: true,
+    signaturePersisted: false
+  };
+}
+
 async function handleVerify(body: JsonRecord): Promise<{ status: number; value: unknown }> {
   const chainKey = body.chainKey;
-  if (!isChainKey(chainKey)) throw new Error("chainKey must be base, arbitrum, or optimism");
+  if (!isChainKey(chainKey)) throw new Error("chainKey must be base or arbitrum; optimism is deferred");
   const chain = MAINNET_CHAINS[chainKey];
   const txHash = requireString(body, "txHash");
   if (!isHash(txHash)) throw new Error("txHash must be a 32-byte transaction hash");
@@ -256,10 +383,11 @@ async function handleVerify(body: JsonRecord): Promise<{ status: number; value: 
   const victim = victimText as Address;
   const destination = destinationText as Address;
   const relayer = relayerText as Address;
-  const nonce = requireString(body, "nonce");
+  const nonce = requireString(body, "nonce") as Hex;
   if (!/^0x[0-9a-fA-F]{64}$/.test(nonce)) throw new Error("nonce must be 32 bytes");
   const expectedAmount = BigInt(requireString(body, "amountBaseUnits"));
   if (expectedAmount <= 0n || expectedAmount > 50_000n) throw new Error("amountBaseUnits is outside the micro-test limit");
+  const calldata = requireCalldata(body);
   const client = publicClient(chainKey);
   if (await client.getChainId() !== chain.chainId) throw new Error("RPC chain ID mismatch");
   const [transaction, receipt] = await Promise.all([
@@ -271,8 +399,22 @@ async function handleVerify(body: JsonRecord): Promise<{ status: number; value: 
   if (receipt.status !== "success") throw new Error("Transaction receipt failed");
   if (transaction.from.toLowerCase() !== relayer.toLowerCase()) throw new Error("Mined transaction sender does not match the relayer");
   if (transaction.to?.toLowerCase() !== chain.usdc.toLowerCase()) throw new Error("Mined transaction target is not native USDC");
+  if (transaction.input.toLowerCase() !== calldata.toLowerCase()) {
+    throw new Error("Mined transaction input does not match the exact signed calldata");
+  }
+  const decoded = decodeFunctionData({ abi: eip3009Abi, data: calldata });
+  if (decoded.functionName !== "transferWithAuthorization") throw new Error("Mined calldata is not transferWithAuthorization");
+  const [signedVictim, signedDestination, signedAmount, , , signedNonce] = decoded.args;
+  if (
+    signedVictim.toLowerCase() !== victim.toLowerCase() ||
+    signedDestination.toLowerCase() !== destination.toLowerCase() ||
+    signedAmount !== expectedAmount ||
+    signedNonce.toLowerCase() !== nonce.toLowerCase()
+  ) {
+    throw new Error("Mined calldata does not match the verified victim, destination, amount, and nonce");
+  }
 
-  const parsedEvents = parseEventLogs({ abi: transferEventAbi, logs: receipt.logs, strict: true });
+  const parsedEvents = parseEventLogs({ abi: transferEventAbi, logs: receipt.logs });
   const transfer = parsedEvents.find((event) =>
     event.eventName === "Transfer" &&
     event.args.from.toLowerCase() === victim.toLowerCase() &&
@@ -281,13 +423,21 @@ async function handleVerify(body: JsonRecord): Promise<{ status: number; value: 
   );
   if (!transfer) throw new Error("Receipt does not contain the exact victim-to-destination USDC Transfer event");
 
-  const [authorizationUsed, victimUsdcAfter, destinationUsdcAfter, victimNativeAfter, relayerNativeAfter, latestBlock] = await Promise.all([
-    client.readContract({ address: chain.usdc, abi: eip3009Abi, functionName: "authorizationState", args: [victim, nonce as Hex] }),
+  const authorizationEvents = parseEventLogs({ abi: authorizationUsedEventAbi, logs: receipt.logs });
+  const authorizationUse = authorizationEvents.find((event) =>
+    event.eventName === "AuthorizationUsed" &&
+    event.args.authorizer.toLowerCase() === victim.toLowerCase() &&
+    event.args.nonce.toLowerCase() === nonce.toLowerCase()
+  );
+  if (!authorizationUse) throw new Error("Receipt does not contain AuthorizationUsed for the exact victim and nonce");
+
+  const [authorizationUsed, victimUsdcAfter, destinationUsdcAfter, victimNativeAfter, relayerNativeAfter, receiptBlock] = await Promise.all([
+    client.readContract({ address: chain.usdc, abi: eip3009Abi, functionName: "authorizationState", args: [victim, nonce], blockNumber: receipt.blockNumber }),
     client.readContract({ address: chain.usdc, abi: eip3009Abi, functionName: "balanceOf", args: [victim] }),
     client.readContract({ address: chain.usdc, abi: eip3009Abi, functionName: "balanceOf", args: [destination] }),
     client.getBalance({ address: victim }),
     client.getBalance({ address: relayer }),
-    client.getBlock({ blockTag: "latest" })
+    client.getBlock({ blockNumber: receipt.blockNumber })
   ]);
 
   const effectiveGasPrice = receipt.effectiveGasPrice;
@@ -310,14 +460,72 @@ async function handleVerify(body: JsonRecord): Promise<{ status: number; value: 
         to: transfer.args.to,
         value: transfer.args.value.toString()
       },
+      authorizationUsedEvent: {
+        authorizer: authorizationUse.args.authorizer,
+        nonce: authorizationUse.args.nonce
+      },
       authorizationUsed,
-      latestBlockTimestamp: latestBlock.timestamp.toString(),
+      receiptBlockNumber: receipt.blockNumber.toString(),
+      receiptBlockTimestamp: receiptBlock.timestamp.toString(),
       balancesAfter: {
         victimUsdc: victimUsdcAfter.toString(),
         destinationUsdc: destinationUsdcAfter.toString(),
         victimNative: victimNativeAfter.toString(),
         relayerNative: relayerNativeAfter.toString()
       }
+    }
+  };
+}
+
+async function handleReplayCheck(body: JsonRecord): Promise<{ status: number; value: unknown }> {
+  const verified = await handleVerify(body);
+  if (verified.status !== 200) return verified;
+  const chainKey = body.chainKey;
+  if (!isChainKey(chainKey)) throw new Error("chainKey must be base or arbitrum; optimism is deferred");
+  const chain = MAINNET_CHAINS[chainKey];
+  const relayer = requireString(body, "relayer") as Address;
+  const calldata = requireCalldata(body);
+  const decoded = decodeFunctionData({ abi: eip3009Abi, data: calldata });
+  if (decoded.functionName !== "transferWithAuthorization") throw new Error("calldata is not an EIP-3009 transferWithAuthorization call");
+  const validAfter = decoded.args[3];
+  const validBefore = decoded.args[4];
+  const verifiedBody = verified.value as {
+    authorizationUsed: boolean;
+    receiptBlockNumber: string;
+    receiptBlockTimestamp: string;
+  };
+  let replayRejected = false;
+  let revertIdentifiesConsumedNonce = false;
+  const replayBlockNumber = BigInt(verifiedBody.receiptBlockNumber);
+  try {
+    await publicClient(chainKey).call({ account: relayer, to: chain.usdc, data: calldata, blockNumber: replayBlockNumber });
+  } catch (error) {
+    if (!containsEvmRevert(error)) throw error;
+    replayRejected = true;
+    revertIdentifiesConsumedNonce = isConsumedAuthorizationNonceRevert(error);
+  }
+  const proof = assessReplayProof({
+    blockTimestamp: BigInt(verifiedBody.receiptBlockTimestamp),
+    validAfter,
+    validBefore,
+    authorizationUsed: verifiedBody.authorizationUsed,
+    replayRejected,
+    revertIdentifiesConsumedNonce
+  });
+  return {
+    status: 200,
+    value: {
+      replayRejected,
+      authorizationUsed: verifiedBody.authorizationUsed,
+      authorizationInsideOriginalWindow: proof.authorizationInsideOriginalWindow,
+      replayRejectedByConsumedNonce: proof.replayRejectedByConsumedNonce,
+      revertIdentifiesConsumedNonce,
+      replayBlockNumber: verifiedBody.receiptBlockNumber,
+      replayBlockTimestamp: verifiedBody.receiptBlockTimestamp,
+      validAfter: validAfter.toString(),
+      validBefore: validBefore.toString(),
+      replayTransactionBroadcast: false,
+      pass: proof.pass
     }
   };
 }
@@ -356,9 +564,18 @@ const server = createServer(async (req, res) => {
       const body = await readJson(req);
       return json(res, 200, await handlePreflight(body));
     }
+    if (req.method === "POST" && url.pathname === "/api/submission-check") {
+      const body = await readJson(req);
+      return json(res, 200, await handleSubmissionCheck(body));
+    }
     if (req.method === "POST" && url.pathname === "/api/verify") {
       const body = await readJson(req);
       const result = await handleVerify(body);
+      return json(res, result.status, result.value);
+    }
+    if (req.method === "POST" && url.pathname === "/api/replay-check") {
+      const body = await readJson(req);
+      const result = await handleReplayCheck(body);
       return json(res, result.status, result.value);
     }
     if (req.method === "GET" && !isApi) {
@@ -375,12 +592,14 @@ const server = createServer(async (req, res) => {
     }
     return json(res, 404, { error: "Not found" });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Request failed";
-    return json(res, 400, { error: message });
+    return json(res, 400, { error: safeErrorMessage(error) });
   }
 });
 
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`Phase 0 mainnet runner listening at ${ORIGIN}`);
-  console.log("This runner never asks for or handles private keys, seed phrases, or EIP-3009 signatures on the server.");
+  console.log(process.env.BASE_RPC_URL?.trim()
+    ? "Base RPC: using server-side BASE_RPC_URL with the official public endpoint as fallback; endpoint omitted."
+    : "Base RPC: using the official public endpoint; BASE_RPC_URL may override it server-side.");
+  console.log("EVM reads and simulations stay in this loopback server; wallet connection, signing, and transaction submission stay in the wallet.");
 });

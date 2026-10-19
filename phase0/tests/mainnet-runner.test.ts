@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Hex } from "viem";
 import { encodeTransferAuthorization } from "../web/eip3009.js";
 import {
+  assessReplayProof,
   AUTHORIZATION_LIFETIME_SECONDS,
   DEFAULT_TEST_AMOUNT,
   encodeTransferAuthorizationCall,
@@ -9,6 +10,7 @@ import {
   makeMainnetAuthorization,
   parseDistinctAddresses,
   parseTinyUsdcAmount,
+  rpcUrlsForChain,
   transferAuthorizationSelector
 } from "../src/mainnet-runner.js";
 
@@ -22,7 +24,15 @@ describe("mainnet EIP-3009 micro-test preparation", () => {
   it("uses only the configured native USDC addresses and mainnet IDs", () => {
     expect(MAINNET_CHAINS.base).toMatchObject({ chainId: 8453, usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" });
     expect(MAINNET_CHAINS.arbitrum).toMatchObject({ chainId: 42161, usdc: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" });
-    expect(MAINNET_CHAINS.optimism).toMatchObject({ chainId: 10, usdc: "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85" });
+    expect(Object.keys(MAINNET_CHAINS)).toEqual(["base", "arbitrum"]);
+  });
+
+  it("keeps the Base RPC override server-side and provides the official public fallback", () => {
+    const override = "https://rpc.example/base";
+    expect(rpcUrlsForChain("base", override)).toEqual([override, "https://mainnet.base.org"]);
+    expect(rpcUrlsForChain("base", "")).toEqual(["https://mainnet.base.org"]);
+    expect(rpcUrlsForChain("arbitrum", override)).toEqual([MAINNET_CHAINS.arbitrum.rpcUrl]);
+    expect(() => rpcUrlsForChain("base", "http://rpc.example/base")).toThrow(/HTTPS/);
   });
 
   it("limits amounts to tiny native USDC quantities", () => {
@@ -50,6 +60,52 @@ describe("mainnet EIP-3009 micro-test preparation", () => {
       nonce
     });
     expect(authorization.validBefore - 2_000_000n).toBe(AUTHORIZATION_LIFETIME_SECONDS);
+  });
+
+  it("accepts replay rejection only when the consumed nonce caused a revert inside the original window", () => {
+    const validProof = assessReplayProof({
+      blockTimestamp: 2_000_100n,
+      validAfter: 1_999_970n,
+      validBefore: 2_000_300n,
+      authorizationUsed: true,
+      replayRejected: true,
+      revertIdentifiesConsumedNonce: true
+    });
+    expect(validProof).toEqual({
+      authorizationInsideOriginalWindow: true,
+      replayRejectedByConsumedNonce: true,
+      pass: true
+    });
+
+    const expiredProof = assessReplayProof({
+      blockTimestamp: 2_000_300n,
+      validAfter: 1_999_970n,
+      validBefore: 2_000_300n,
+      authorizationUsed: true,
+      replayRejected: true,
+      revertIdentifiesConsumedNonce: true
+    });
+    expect(expiredProof).toMatchObject({ authorizationInsideOriginalWindow: false, pass: false });
+
+    const unrelatedRevert = assessReplayProof({
+      blockTimestamp: 2_000_100n,
+      validAfter: 1_999_970n,
+      validBefore: 2_000_300n,
+      authorizationUsed: true,
+      replayRejected: true,
+      revertIdentifiesConsumedNonce: false
+    });
+    expect(unrelatedRevert).toMatchObject({ authorizationInsideOriginalWindow: true, pass: false });
+
+    const unusedNonce = assessReplayProof({
+      blockTimestamp: 2_000_100n,
+      validAfter: 1_999_970n,
+      validBefore: 2_000_300n,
+      authorizationUsed: false,
+      replayRejected: true,
+      revertIdentifiesConsumedNonce: true
+    });
+    expect(unusedNonce).toMatchObject({ authorizationInsideOriginalWindow: true, pass: false });
   });
 
   it("encodes exactly the signed authorization calldata in browser and viem", () => {

@@ -1,323 +1,125 @@
-# ZecRescue — AGENTS.md
+# ZecRescue — Agent Instructions
 
-## Project
+## Product and locked V1 scope
 
-ZecRescue is a multi-chain emergency wallet rescue tool for compromised EVM wallets.
+ZecRescue is a non-custodial emergency rescue tool for compromised EVM wallets. V1 supports **native Circle USDC on Base and Arbitrum**. Optimism is deferred and must not appear as a supported or broadcastable product chain until a later scope decision.
 
-V1 rescues **native USDC** from the same compromised address across:
+The compromised wallet signs narrowly scoped EIP-3009 typed data. A separate relayer submits the authorization and pays native gas. The victim must spend zero native gas. Rescued USDC is routed through NEAR Intents to ZEC and finally into a user-controlled Zcash Recovery Vault whose funds are shielded into the current Ironwood-compatible pool.
 
-- Base
-- Arbitrum
-- Optimism
+## Phase 0 disposition
 
-The compromised wallet does **not** need native gas. A relayer submits the rescue transaction and fronts the native gas. In production, that gas cost must be reimbursed from successfully rescued USDC rather than permanently subsidized by ZecRescue.
+Phase 0 is **CONDITIONAL PASS** based on the project owner's recorded mainnet proofs and the limited current evidence in `PHASE0_REPORT.md`:
 
-Recovered USDC is converted to ZEC through a cross-chain route, then moved into a **user-controlled Zcash Recovery Vault** whose recovered funds end in the **Ironwood shielded pool**.
+- Base gasless EIP-3009 rescue: reported proven on mainnet.
+- Arbitrum gasless EIP-3009 rescue: reported proven on mainnet.
+- Base native-USDC to ZEC: live NEAR Intents quote proven; conversion not funded.
+- Zingo PC Mainnet creation/sync, `t1` receiver generation, and Ironwood-capable unified-address generation: user-reported proven.
+- End-to-end Base/Arbitrum conversion, incoming ZEC detection, transparent-to-Ironwood shielding, and final end-to-end confirmation remain pending because test funding is unavailable.
 
-## Recovery Vault definition
+Those funded validations are deliberately scheduled **after Phase 6**. Do not claim they are complete. Do not spend real funds during Phases 1–6 without explicit user approval.
 
-The **Recovery Vault** is a user-owned Zallet account used for recovered ZEC.
+## Non-negotiable security rules
 
-It is **not**:
-
-- a ZecRescue custodial wallet
-- a smart contract vault
-- a backend wallet
-
-The user controls the Zcash spending authority. ZecRescue only orchestrates recovery and shielding.
-
-## Non-negotiable product rules
-
-- ZecRescue is **non-custodial**.
-- Never request or store a seed phrase or raw private key.
-- Never store Zcash spending keys in the backend or MongoDB.
-- Never persist the final Recovery Vault identity in MongoDB.
-- The user controls the Recovery Vault.
-- The relayer is only a gas payer / transaction submitter.
-- The relayer must never become the custody destination for rescued funds.
-- Final recovery must end in user-controlled shielded ZEC.
-- Core rescue functionality must not be mocked in the final demo.
-- One chain failing must not cancel successful rescues on other chains.
+- Never request, import, receive, or store the compromised wallet's seed phrase or private key.
+- Never request, receive, or send Zcash seed phrases, spending keys, or viewing keys to the backend.
+- Never custody rescued funds. The relayer is a gas payer and scoped transaction submitter only.
+- The Recovery Vault is controlled by the user; it is not a ZecRescue or backend wallet.
+- Never persist a permanent compromised EVM address to Recovery Vault identity/address mapping.
+- MongoDB stores orchestration metadata only; do not store raw signatures longer than operationally necessary.
+- A clean user-controlled EVM refund address is required. Never default a refund to the compromised wallet.
+- Authorization must bind chain, native USDC contract, amount, route/destination, nonce, and a short validity window. Never silently change signed parameters.
+- No unlimited approvals. Avoid approvals entirely where EIP-3009 is used.
+- Do not log RPC credentials, API keys, raw authorizations, Zcash receivers, or sensitive wallet data. Redact provider errors.
+- Never claim a simulated, dry, quoted, or mocked result as an on-chain success.
+- Each source chain is an independent leg. One failure must not roll back a successful other leg.
 
 ## Stack
 
-### Frontend
-- React
-- Vite
-- TypeScript
-- Tailwind CSS
-- wagmi
-- viem
+- Frontend: React, Vite, TypeScript, Tailwind CSS, wagmi, viem.
+- Backend: Node.js, Express, TypeScript, viem.
+- Database: MongoDB / MongoDB Atlas.
+- Cross-chain: NEAR Intents, using only route behavior validated for the current flow.
+- Zcash: local light-client architecture. Phase 0 evidence uses Zingo PC. The target is the smallest maintainable programmable Zingo/Zingolib-compatible local wallet layer behind `zecrescue-agent` and remote lightwalletd.
+- Hosting targets: Vercel frontend; Render backend; user machine for `zecrescue-agent` and local wallet layer.
 
-### Backend
-- Node.js
-- Express
-- TypeScript
-- viem
+**Do not install Zebra, zecd, or any full Zcash node.** The laptop storage budget makes a full node unsuitable, and V1 is light-client based. Zingo PC's wallet creation/sync proof does not itself prove a programmable agent API; validate the exact supported library/API before claiming Phase 3 complete.
 
-### Database
-- MongoDB
-- MongoDB Atlas
-
-### Cross-chain
-- NEAR Intents or the exact route validated in Phase 0
-
-### Zcash
-- Zallet
-- Zebra if required by the validated local flow
-- Ironwood as the final shielded pool
-- local `zecrescue-agent` companion service
-
-### Deployment
-- Vercel — frontend
-- Render — backend
-- MongoDB Atlas — database
-- `zecrescue-agent` — runs locally beside Zallet
-
-## Local Zcash companion
-
-The hosted web app must **not** connect directly to Zallet RPC.
-
-Use a small local companion service:
+## Local Zcash architecture
 
 ```text
-React app
-   ↓ localhost only
-zecrescue-agent
-   ↓ localhost only
-Zallet RPC
+Web app → hosted API/orchestrator → loopback-only zecrescue-agent
+                                      → local light-wallet layer
+                                      → remote lightwalletd
 ```
 
-The companion is responsible for:
+The hosted app must never connect directly to a local wallet RPC. Keep local agent and wallet RPC bound to loopback. Generate receive paths locally and keep keys local. Expose the smallest explicit API needed for capabilities, receive-path creation, status polling, transaction preparation, local signing/approval, broadcast, and user-approved withdrawal. Do not invent Zallet/Zingo RPC calls or an `ironwood` selector. Follow the current wallet API terminology and verify the resulting pool.
 
-- talking to local Zallet
-- generating Zcash receiving paths
-- monitoring incoming ZEC
-- initiating shielding
-- initiating user-approved withdrawals
+Use distinct temporary receiving paths for Base and Arbitrum. Do not intentionally merge them before shielding. Keep the path-to-chain association local whenever possible; any hosted transient receiver needed to form a quote must expire and be deleted after completion, refund, or expiry.
 
-Zallet RPC must remain local-only.
+## Phase workflow
 
-The companion must never upload Zcash keys to the hosted backend.
+Work sequentially and do not skip phases. Maintain `BUILD_PROGRESS.md`. At each phase end:
 
-## Ironwood terminology rule
+1. Implement the phase's in-scope behavior.
+2. Run relevant tests, typecheck, lint, and production build.
+3. Run security/privacy checks and review against `AGENTS.md`, `SPEC.md`, and `DESIGN.md`.
+4. Resolve findings that can be fixed locally.
+5. Perform a major-review checkpoint with a GPT-6 Sol High-style adversarial review.
+6. Record summary, checks, commit SHA, and unresolved non-blocking items in `BUILD_PROGRESS.md`.
+7. Commit the completed phase before starting the next.
 
-Ironwood is the final shielded pool for this 2026 build.
-
-Do **not** invent RPC methods, parameters, or selectors named `ironwood` unless the current Zallet API actually exposes them.
-
-Zallet may still expose current Ironwood-backed functionality through existing names such as `orchard` or generic shielded selectors. Follow the actual current RPC/API behavior discovered in Phase 0.
-
-## V1 scope
-
-### Supported source chains
-1. Base
-2. Arbitrum
-3. Optimism
-
-All three are required for V1.
-
-### Supported asset
-- Native USDC only
-
-Do not add in V1:
-- Ethereum mainnet
-- Solana
-- USDT
-- USDC.e
-- arbitrary ERC-20 tokens
-- native ETH rescue
-- NFTs
-
-## Build workflow
-
-Work in phases. Do not skip ahead.
-
-### Phase 0 — Feasibility spike
-
-Prove the risky pieces before UI work.
-
-Must verify:
-- native USDC contract and gasless authorization support on all three chains
-- relayer-submitted rescue with zero native gas from the compromised wallet
-- whether direct EIP-3009 routing is sufficient or a minimal RescueRouter is required
-- exact relayer reimbursement mechanism
-- NEAR Intents USDC → ZEC quote/deposit/status flow
-- `UNDER_REVIEW` / compliance-review behavior
-- refund behavior on failed cross-chain conversion
-- use of a fresh user-controlled EVM refund wallet
-- local `zecrescue-agent` ↔ Zallet RPC flow
-- Zcash receiver generation
-- incoming ZEC monitoring
-- temporary transparent-receiver handling if required
-- shielding into Ironwood using the actual current Zallet API semantics
-- user-controlled Zcash wallet ownership
-
-If any core piece cannot be proven without mocking it, stop and report the blocker.
+Continue automatically through Phase 6 unless a genuine user-only action blocks progress. Never use mainnet signing, broadcasting, deployment, or real funds without explicit user approval. Do not block on missing credentials for code that can be safely implemented and tested with injected test doubles; clearly mark external integration checks as pending.
 
 ### Phase 1 — Core rescue engine
 
-Build:
-- multi-chain balance scanner
-- rescue job model
-- authorization generation
-- authorization validation
-- relayer submission
-- per-chain rescue state machine
+Implement Base + Arbitrum native-USDC scanning, EIP-3009 authorization flow, validation and relayer submission, short expiry, replay/nonce protection, zero victim gas, MongoDB rescue-job state, per-chain tracking, and safe retries/idempotency. Do not add secret-key handling for victims.
 
 ### Phase 2 — Cross-chain conversion
 
-Build:
-- USDC → ZEC quoting
-- deposit routing
-- quote-expiry handling
-- transaction/status monitoring
-- `UNDER_REVIEW` handling
-- refund handling
+Implement NEAR Intents Base and Arbitrum USDC→ZEC quotes, quote expiry, deposit-address handling, recipient and clean refund-address verification, provider status monitoring, minimums, fee/slippage display, retries, and partial failures. Map provider states conservatively; do not invent `UNDER_REVIEW` if the live API does not expose it. Do not send funds.
 
 ### Phase 3 — Zcash Recovery Vault
 
-Build:
-- local companion integration
-- user-owned recovery account integration
-- separate receiving path per source chain
-- incoming ZEC monitoring
-- automatic shielding into Ironwood
-- private withdrawal flow
-- public/exchange withdrawal warning
+Build the light-client-based programmable local `zecrescue-agent` and wallet-layer bridge. Keep keys local; generate distinct receivers, detect funds, prepare and locally sign approved shielding/withdrawal transactions, broadcast through the supported lightwalletd path, and report status. Do not install a full node. If current public APIs cannot support an operation, expose a truthful unsupported/blocked state instead of a fake success.
 
 ### Phase 4 — Multi-chain orchestration
 
-Build:
-- Rescue All
-- independent chain execution
-- partial-success handling
-- retry handling
-- final recovery summary
+Combine independent Base and Arbitrum legs with partial-success, retries, quote-expiry/provider-failure handling, per-chain temporary Zcash paths, and privacy-minimized persistent state.
 
-### Phase 5 — Security + failure hardening
+### Phase 5 — Production hardening
 
-Build:
-- strict input validation
-- rate limits
-- relayer balance protection
-- nonce / replay protection
-- failure recovery
-- privacy-safe data retention
-- safe logs
-- secrets hygiene
+Implement validation, replay safety, relayer balance/abuse controls, rate limits, idempotency and bounded retries, quote/refund edge cases, minimum thresholds, gas accounting and reimbursement. Select the safest practical design based on the Phase 0 evidence. If a RescueRouter is needed, keep it minimal, route-bound, and independently reviewed; do not let a relayer/admin redirect assets.
 
-### Phase 6 — UI polish + demo
+### Phase 6 — UI and demo
 
-Only after the end-to-end rescue works.
+Build the complete responsive user journey only after the engine and integrations exist. Mark demo/test data clearly. Never fake mainnet success. Show attacker-race and non-retroactive-privacy warnings, partial failures, review/refund/expiry states, and transaction links.
+
+## Deferred funded validation
+
+After Phase 6, and only after user approval/funding, perform:
+
+- Base USDC→ZEC live conversion.
+- Arbitrum USDC→ZEC live conversion.
+- Incoming ZEC detection.
+- Transparent ZEC→Ironwood-compatible shielding.
+- Final end-to-end confirmation.
+
+Until then the product must be marked **PENDING FINAL PHASE 0 FUNDED VALIDATION** even if Phases 1–6 are implemented.
+
+## Data and database rules
+
+MongoDB may persist only the minimum rescue orchestration state: job/leg IDs, chain, public EVM source/refund addresses as operationally necessary, amounts, expiry, transaction hashes, states, gas accounting, timestamps, and bounded non-sensitive errors. Use explicit TTL for temporary quote/deposit/receiver data when it must be stored. Never store:
+
+- any seed phrase or private key;
+- Zcash viewing or spending keys or wallet backup;
+- a permanent Recovery Vault identity or shielded address;
+- a permanent EVM-to-Zcash mapping;
+- unnecessary raw signatures.
+
+## Ironwood and privacy terminology
+
+Ironwood is the intended final pool name for this 2026 product. Current wallet APIs may expose the corresponding pool through older names such as Orchard or generic shielded selectors. Do not invent API parameters. Do not call a transparent receipt private; privacy is not retroactive. Mark shielding complete only after local wallet status and transaction confirmation support it.
 
 ## Review checkpoints
 
-Use GPT-6 Sol High for major reviews after:
-
-- Phase 0
-- authorization/signature implementation
-- gas reimbursement implementation
-- relayer implementation
-- any smart contract added to the design
-- local Zcash companion implementation
-- Zcash shielding implementation
-- full end-to-end rescue
-- final security review before deployment/demo
-
-## Security rules
-
-Never:
-- ask for a seed phrase
-- ask for a raw private key
-- send user keys to the backend
-- commit secrets
-- expose relayer private keys to the frontend
-- store Zcash spending keys in MongoDB
-- persist a permanent mapping between the compromised EVM address and the user's Zcash Recovery Vault
-- use unlimited approvals without an explicit reason
-- silently change a signed rescue destination
-
-Authorization must be as narrowly scoped as the chosen standard allows:
-- chain-specific
-- token-specific
-- amount-specific
-- destination-specific
-- nonce-protected
-- time-limited
-
-## Refund-wallet rule
-
-Before rescue begins, the user must provide a **fresh, clean EVM refund address** that they control.
-
-- It must not be the compromised wallet.
-- ZecRescue never controls its private key.
-- The same clean address may be used as the refund destination across Base, Arbitrum, and Optimism if the validated provider flow supports that.
-- Phase 0 must confirm exact provider refund semantics.
-
-## Gas sponsorship rules
-
-### Demo
-- One dedicated relayer wallet may be used across Base, Arbitrum, and Optimism.
-- Manually fund the relayer with tiny native ETH balances on each network.
-
-### Production
-- The relayer may front native gas technically.
-- ZecRescue must not permanently subsidize user gas.
-- Successful rescues must reimburse the gas cost from rescued USDC.
-- The exact reimbursement mechanism is **not locked** until Phase 0 proves the simplest safe approach.
-
-Candidate approaches:
-- direct authorization route plus safe reimbursement
-- minimal RescueRouter that atomically separates reimbursement and forwards the remaining USDC
-
-Do not assume either design is final before Phase 0.
-
-## MongoDB privacy rules
-
-MongoDB may store the minimum EVM-side rescue state needed for operation.
-
-Do not permanently store:
-- Recovery Vault address / identifier
-- final shielded Zcash address
-- Zcash viewing or spending keys
-- a long-lived compromised-EVM ↔ Zcash-wallet mapping
-
-If a temporary Zcash receiver must pass through the hosted backend for quoting/routing:
-- store it only ephemerally
-- apply a short TTL
-- delete it after the rescue leg completes or expires
-- never treat it as a durable user profile field
-
-## Zcash privacy rules
-
-- Use a distinct Zcash receiving path for each source chain.
-- Do not intentionally merge public recovery paths before shielding.
-- Do not claim privacy before funds have actually entered Ironwood.
-- The user controls the Recovery Vault keys.
-- Default withdrawal should prefer shielded-to-shielded ZEC.
-- If the user exits to a transparent address or exchange deposit, show a clear privacy-boundary warning.
-
-## Threat-model truthfulness
-
-Do not claim:
-- guaranteed recovery
-- guaranteed ability to beat an attacker
-- retroactive privacy
-- direct shielded payout from the cross-chain provider unless proven
-- that an attacker with the private key loses signing authority
-
-The product removes the need to deposit gas into the compromised wallet and reduces post-recovery linkability once value is shielded in Zcash.
-
-## Failure philosophy
-
-Each chain is an independent rescue job.
-
-Example:
-- Base — completed
-- Arbitrum — failed
-- Optimism — completed
-
-This is a valid partial rescue.
-
-Never roll back successful rescues because another chain failed.
+Major adversarial reviews are required after Phase 0, authorization implementation, gas reimbursement, relayer implementation, any contract, local wallet-agent implementation, shielding implementation, full end-to-end assembly, and final security review. Record review findings and disposition in `BUILD_PROGRESS.md`.

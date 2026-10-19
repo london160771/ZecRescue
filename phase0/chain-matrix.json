@@ -1,6 +1,11 @@
 {
-  "asOfDate": "2026-10-15",
-  "evidencePolicy": "Production mainnets only. Testnet references are retained only as historical configuration and are not evidence.",
+  "asOfDate": "2026-10-19",
+  "v1Scope": {
+    "chains": ["base", "arbitrum"],
+    "deferredChains": ["optimism"],
+    "asset": "native Circle USDC only"
+  },
+  "evidencePolicy": "Production mainnets only. Testnet references are not evidence.",
   "mainnet": {
     "base": {
       "chainId": 8453,
@@ -14,56 +19,42 @@
       "nativeUsdc": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
       "nearIntentsAssetId": "nep141:arb-0xaf88d065e77c8cc2239327c5edb3a432268e5831.omft.near"
     },
-    "optimism": {
-      "chainId": 10,
-      "rpcUrl": "https://mainnet.optimism.io",
-      "nativeUsdc": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
-      "nearIntentsAssetId": "nep245:v2_1.omni.hot.tg:10_A2ewyUyDp6qsue1jqZsGypkCxRJ"
-    }
-  },
-  "legacyNonEvidenceTestnetReference": {
-    "base": {
-      "chainId": 84532,
-      "rpcUrl": "https://sepolia.base.org",
-      "nativeUsdc": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
-    },
-    "arbitrum": {
-      "chainId": 421614,
-      "rpcUrl": "https://sepolia-rollup.arbitrum.io/rpc",
-      "nativeUsdc": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d"
-    },
-    "optimism": {
-      "chainId": 11155420,
-      "rpcUrl": "https://sepolia.optimism.io",
-      "nativeUsdc": "0x5fd84259d66Cd46123540766Be93DFE6D43130D7"
+    "deferred": {
+      "optimism": {
+        "chainId": 10,
+        "nativeUsdc": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+        "status": "DEFERRED; not a V1 product chain"
+      }
     }
   },
   "destination": {
     "chain": "zcash",
     "symbol": "ZEC",
     "decimals": 8,
-    "nearIntentsAssetId": "nep141:zec.omft.near"
+    "nearIntentsAssetId": "nep141:zec.omft.near",
+    "walletArchitecture": "local light client plus remote lightwalletd; no Zebra/full node"
   },
-  "phase0Mainnet": {
-    "checkedAt": "2026-10-15",
-    "userWalletRunnerReadiness": {
-      "base": "READY FOR USER SIGNING; broadcast enabled only after browser and wallet confirmations; no signature or transaction made by Codex",
-      "arbitrum": "READY AFTER BASE PASS; dry-run only unless PHASE0_BASE_MAINNET_PASS=1 and PHASE0_ENABLE_NON_BASE=1",
-      "optimism": "READY AFTER BASE PASS; dry-run only unless PHASE0_BASE_MAINNET_PASS=1 and PHASE0_ENABLE_NON_BASE=1",
-      "zcashDocker": "PREPARED / NOT YET PROVEN"
+  "phase0": {
+    "status": "CONDITIONAL PASS",
+    "ownerConfirmedMainnetProofs": {
+      "baseEip3009GaslessRescue": true,
+      "arbitrumEip3009GaslessRescue": true,
+      "zingoPcWalletCreationAndSync": true,
+      "transparentT1ReceiverGeneration": true,
+      "ironwoodCompatibleUnifiedAddressGeneration": true
     },
-    "eip3009": {
-      "base": "BLOCKED: mainnet interface checked read-only; no valid authorization transaction mined",
-      "arbitrum": "BLOCKED: mainnet interface checked read-only; no valid authorization transaction mined",
-      "optimism": "BLOCKED: mainnet interface checked read-only; no valid authorization transaction mined"
+    "mainnetQuoteProofs": {
+      "baseUsdcToZec": "A live quote was returned; PENDING_DEPOSIT before deadline; quote expired unused; no conversion",
+      "arbitrumUsdcToZec": "Earlier dry quote only; no funded conversion"
     },
-    "nearIntents": {
-      "base": "MAINNET quote proven only: 10 USDC non-dry quote and deposit address returned, status PENDING_DEPOSIT; no funds deposited, so conversion BLOCKED",
-      "arbitrum": "MAINNET dry quote proven only: 10 USDC quote returned; funded quote/deposit/conversion BLOCKED",
-      "optimism": "Direct OP to ZEC unavailable; OP USDC to Base USDC returned HTTP 400 pair unavailable for 10/100/1000 USDC EXACT_INPUT and 10 USDC EXACT_OUTPUT/FLEX_INPUT dry probes"
-    },
-    "optimismToBaseToZec": "BLOCKED: direct NEAR OP-to-Base quote unavailable; Circle CCTP OP-to-Base remains documentation-only and was not tested",
-    "zcashLiveReceiverAndShielding": "BLOCKED: no usable WSL distro/Zallet/Zebra; no mainnet account, receiver, incoming ZEC, or shield transaction tested",
-    "mainnetTransactionsMoved": false
+    "pendingAfterPhase6": [
+      "Base USDC to ZEC live conversion",
+      "Arbitrum USDC to ZEC live conversion",
+      "incoming ZEC detection",
+      "transparent ZEC to Ironwood-compatible shielding",
+      "final end-to-end confirmation"
+    ],
+    "mainnetTransactionsMovedByCurrentBuild": false,
+    "noNewRealMoneyTestsWithoutExplicitApproval": true
   }
 }

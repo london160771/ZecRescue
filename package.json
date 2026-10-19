@@ -8,7 +8,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "phase0:near-chain": "tsx phase0/scripts/near-chained-route.ts",
-    "phase0:mainnet": "tsc -p phase0/tsconfig.runner.json && node dist/phase0-runner/scripts/mainnet-runner-server.js"
+    "phase0:mainnet": "tsc -p phase0/tsconfig.runner.json && node --env-file-if-exists=.env dist/phase0-runner/scripts/mainnet-runner-server.js"
   },
   "dependencies": {
     "viem": "2.37.9"

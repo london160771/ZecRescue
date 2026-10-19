@@ -10,7 +10,7 @@ import {
   type Hex
 } from "viem";
 
-export type MainnetChainKey = "base" | "arbitrum" | "optimism";
+export type MainnetChainKey = "base" | "arbitrum";
 
 export type MainnetChainConfig = {
   key: MainnetChainKey;
@@ -35,14 +35,34 @@ export const MAINNET_CHAINS: Record<MainnetChainKey, MainnetChainConfig> = {
     rpcUrl: "https://arb1.arbitrum.io/rpc",
     usdc: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
   },
-  optimism: {
-    key: "optimism",
-    name: "Optimism",
-    chainId: 10,
-    rpcUrl: "https://mainnet.optimism.io",
-    usdc: "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"
-  }
 };
+
+export function rpcUrlsForChain(
+  chainKey: MainnetChainKey,
+  configuredBaseRpcUrl = process.env.BASE_RPC_URL
+): readonly string[] {
+  const publicFallback = MAINNET_CHAINS[chainKey].rpcUrl;
+  if (chainKey !== "base" || !configuredBaseRpcUrl?.trim()) return [publicFallback];
+
+  const configured = configuredBaseRpcUrl.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(configured);
+  } catch {
+    throw new Error("BASE_RPC_URL must be a valid HTTPS URL or loopback HTTP URL");
+  }
+
+  const loopbackHttp = parsed.protocol === "http:" &&
+    (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]");
+  if (parsed.protocol !== "https:" && !loopbackHttp) {
+    throw new Error("BASE_RPC_URL must use HTTPS, except for a loopback HTTP endpoint");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("BASE_RPC_URL credentials must be supplied by the endpoint provider, not embedded as URL user info");
+  }
+
+  return configured === publicFallback ? [publicFallback] : [configured, publicFallback];
+}
 
 export const USDC_DECIMALS = 6;
 export const DEFAULT_TEST_AMOUNT = "0.01";
@@ -175,6 +195,32 @@ export function makeMainnetAuthorization(
       : 0n,
     validBefore: blockTimestamp + AUTHORIZATION_LIFETIME_SECONDS,
     nonce
+  };
+}
+
+export function assessReplayProof(input: {
+  blockTimestamp: bigint;
+  validAfter: bigint;
+  validBefore: bigint;
+  authorizationUsed: boolean;
+  replayRejected: boolean;
+  revertIdentifiesConsumedNonce: boolean;
+}): {
+  authorizationInsideOriginalWindow: boolean;
+  replayRejectedByConsumedNonce: boolean;
+  pass: boolean;
+} {
+  const authorizationInsideOriginalWindow =
+    input.blockTimestamp > input.validAfter && input.blockTimestamp < input.validBefore;
+  const replayRejectedByConsumedNonce = authorizationInsideOriginalWindow &&
+    input.authorizationUsed &&
+    input.replayRejected &&
+    input.revertIdentifiesConsumedNonce;
+
+  return {
+    authorizationInsideOriginalWindow,
+    replayRejectedByConsumedNonce,
+    pass: replayRejectedByConsumedNonce
   };
 }
 

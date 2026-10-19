@@ -28,7 +28,7 @@
   </head>
   <body>
     <h1>Phase 0 mainnet micro-test</h1>
-    <p class="warning"><strong>Real mainnet USDC transfer.</strong> This spike is not a product UI. Base is enabled for the first test. Nothing signs or broadcasts automatically; the runner never receives a private key, seed phrase, or signature.</p>
+    <p class="warning"><strong>Real mainnet USDC transfer.</strong> This spike is not a product UI. Base is enabled for the first test. Nothing signs or broadcasts automatically. The local runner never receives a private key or seed phrase. EVM reads and simulations run in the loopback server; the browser sends only localhost API requests plus wallet connect/sign/submit requests.</p>
 
     <section class="card">
       <h2>1. Select and connect</h2>
@@ -54,7 +54,7 @@
       <h2>2. Preflight</h2>
       <button id="dry-run" class="secondary">Dry run only</button>
       <button id="prepare">Prepare authorization for signing</button>
-      <p class="small">Both actions validate mainnet chain ID, the configured native USDC contract and metadata, victim balance, destination EOA, unused random nonce, and an intentionally invalid-signature probe. Dry run stops before wallet signing. Exact signed-call simulation and gas estimate require the real authorization.</p>
+      <p class="small">Both actions ask the local runner to validate mainnet chain ID, native USDC metadata, victim balance, destination EOA, unused random nonce, and an intentionally invalid-signature probe. Dry run stops before wallet signing. After signing, exact-call simulation and gas checks run locally using calldata sent only to the loopback API; it is not persisted.</p>
       <pre id="authorization-view">No authorization prepared.</pre>
     </section>
 
@@ -62,8 +62,7 @@
       <h2>3. User signature and relayer submission</h2>
       <button id="sign" disabled>Sign EIP-712 authorization as victim</button>
       <button id="submit" class="danger" disabled>Submit from relayer wallet</button>
-      <button id="replay" class="secondary" disabled>Verify replay rejection</button>
-      <p class="small">After signing, switch the connected wallet to the separate relayer account. The runner checks that account before simulating and submitting. The submit button shows a second explicit confirmation before opening the wallet transaction prompt.</p>
+      <p class="small">Before signing, the wallet is asked to switch to the selected mainnet. After signing, switch the connected wallet to the separate relayer account. The local runner simulates the exact signed call and checks balances/gas before the submit button shows a second explicit confirmation and opens the wallet transaction prompt. After the original transfer confirms, the runner immediately simulates the exact same calldata at the receipt block, verifies the authorization is still within its original 300-second window, and confirms the consumed nonce caused the revert. The replay check is a read-only call; no second transaction is broadcast.</p>
     </section>
 
     <section class="card">

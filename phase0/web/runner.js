@@ -2,12 +2,11 @@ import { encodeTransferAuthorization } from "/eip3009.js";
 
 const $ = (id) => document.getElementById(id);
 const provider = window.ethereum;
-const state = { config: null, victim: null, preflight: null, signature: null, calldata: null, txHash: null, relayerBefore: null, dryRun: false, formSnapshot: null };
+const state = { config: null, victim: null, activeAccount: null, walletChainId: null, preflight: null, signature: null, calldata: null, txHash: null, submissionCheck: null, verifyRequest: null, transferProof: null, dryRun: false, formSnapshot: null };
 
 function setStatus(message) { $("status").textContent = message; }
 function show(id, value) { $(id).textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2); }
 function requireWallet() { if (!provider?.request) throw new Error("No injected EVM wallet was found. Use a local wallet extension with separate disposable accounts."); return provider; }
-function chainConfig() { return state.config.chains.find((item) => item.key === $("chain").value); }
 function asBigInt(value) { return BigInt(value); }
 function formatNative(wei) { return `${(Number(BigInt(wei)) / 1e18).toFixed(8)} ETH`; }
 function amountFields() { return { chainKey: $("chain").value, victim: state.victim, destination: $("destination").value.trim(), relayer: $("relayer").value.trim(), amount: $("amount").value.trim() }; }
@@ -17,9 +16,8 @@ function assertFormUnchanged() {
   }
 }
 function setButtons() {
-  $("sign").disabled = !state.preflight || state.dryRun || !state.preflight.broadcast.enabled;
-  $("submit").disabled = !state.signature;
-  $("replay").disabled = !state.txHash;
+  $("sign").disabled = !state.preflight || state.dryRun || !state.preflight.broadcast.enabled || Boolean(state.txHash);
+  $("submit").disabled = !state.signature || Boolean(state.txHash);
 }
 
 async function api(path, body) {
@@ -33,32 +31,39 @@ async function connectVictim() {
   const wallet = requireWallet();
   const accounts = await wallet.request({ method: "eth_requestAccounts" });
   if (!Array.isArray(accounts) || typeof accounts[0] !== "string") throw new Error("Wallet did not return an account");
+  if (state.victim && state.victim.toLowerCase() !== accounts[0].toLowerCase()) {
+    state.preflight = null;
+    state.signature = null;
+    state.calldata = null;
+    state.txHash = null;
+    state.formSnapshot = null;
+    state.transferProof = null;
+  }
   state.victim = accounts[0];
+  state.activeAccount = accounts[0];
   $("victim-connected").textContent = state.victim;
   $("victim-connected").style.color = "#a9d8bc";
 }
 
-async function checkConnectedChain(expected) {
-  const actual = await requireWallet().request({ method: "eth_chainId" });
-  if (typeof actual !== "string" || BigInt(actual) !== BigInt(expected)) {
-    throw new Error(`Wallet is on chain ${actual}; switch it to mainnet chain ID ${expected}`);
-  }
+async function ensureWalletChain(expected) {
+  const expectedHex = `0x${BigInt(expected).toString(16)}`;
+  if (state.walletChainId && BigInt(state.walletChainId) === BigInt(expected)) return;
+  await requireWallet().request({ method: "wallet_switchEthereumChain", params: [{ chainId: expectedHex }] });
+  state.walletChainId = expectedHex;
 }
 
 async function prepare(isDryRun) {
   if (!state.victim) await connectVictim();
-  const chain = chainConfig();
-  await checkConnectedChain(chain.chainId);
-  const accounts = await requireWallet().request({ method: "eth_accounts" });
-  if (!Array.isArray(accounts) || accounts[0]?.toLowerCase() !== state.victim.toLowerCase()) {
-    throw new Error("Select the victim account before preflight");
-  }
+  if (state.activeAccount?.toLowerCase() !== state.victim.toLowerCase()) throw new Error("Select the victim account in your wallet before preflight");
   const fields = amountFields();
   const result = await api("/api/preflight", fields);
   state.preflight = result.result;
   state.signature = null;
   state.calldata = null;
   state.txHash = null;
+  state.submissionCheck = null;
+  state.verifyRequest = null;
+  state.transferProof = null;
   state.relayerBefore = null;
   state.dryRun = isDryRun;
   state.formSnapshot = JSON.stringify(fields);
@@ -89,11 +94,11 @@ async function signAuthorization() {
   assertFormUnchanged();
   if (!p.broadcast.enabled) throw new Error(p.broadcast.reason);
   const wallet = requireWallet();
-  await checkConnectedChain(p.chain.chainId);
-  const accounts = await wallet.request({ method: "eth_accounts" });
-  if (!Array.isArray(accounts) || accounts[0]?.toLowerCase() !== p.addresses.victim.toLowerCase()) {
+  if (state.activeAccount?.toLowerCase() !== p.addresses.victim.toLowerCase()) {
     throw new Error("Select the victim account in the wallet before signing");
   }
+  await ensureWalletChain(p.chain.chainId);
+  if (state.activeAccount?.toLowerCase() !== p.addresses.victim.toLowerCase()) throw new Error("Wallet account changed; select the victim account and prepare again");
   const payload = {
     domain: p.domain,
     types: p.typedData.types,
@@ -104,20 +109,10 @@ async function signAuthorization() {
   if (typeof signature !== "string") throw new Error("Wallet did not return a signature");
   state.signature = signature;
   state.calldata = encodeTransferAuthorization(p.functionSelector, p.authorization, signature);
+  state.submissionCheck = null;
   setButtons();
-  setStatus("Victim authorization signature is held in this page's memory only. Switch wallet account to the separate relayer EOA.");
-  show("result", { signed: true, victim: p.addresses.victim, amount: p.amount.display, destination: p.addresses.destination, expiresAtUnix: p.authorization.validBefore, signatureSentToServer: false });
-}
-
-async function waitForReceipt(hash) {
-  const wallet = requireWallet();
-  for (let attempt = 0; attempt < 120; attempt += 1) {
-    const receipt = await wallet.request({ method: "eth_getTransactionReceipt", params: [hash] });
-    if (receipt) return receipt;
-    setStatus(`Waiting for mainnet receipt… (${attempt + 1}/120)`);
-    await new Promise((resolve) => setTimeout(resolve, 5_000));
-  }
-  throw new Error("Receipt wait timed out. Keep the transaction hash; the transfer may still mine.");
+  setStatus("Victim authorization is held in this page's memory. The signed call will be sent only to this loopback runner for simulation; switch the wallet account to the separate relayer EOA.");
+  show("result", { signed: true, victim: p.addresses.victim, amount: p.amount.display, destination: p.addresses.destination, expiresAtUnix: p.authorization.validBefore, signatureSentToLocalRunner: false, signaturePersisted: false });
 }
 
 async function submitFromRelayer() {
@@ -126,23 +121,29 @@ async function submitFromRelayer() {
   assertFormUnchanged();
   if (!p.broadcast.enabled) throw new Error(p.broadcast.reason);
   const wallet = requireWallet();
-  await checkConnectedChain(p.chain.chainId);
-  const accounts = await wallet.request({ method: "eth_accounts" });
-  if (!Array.isArray(accounts) || accounts[0]?.toLowerCase() !== p.addresses.relayer.toLowerCase()) {
+  if (state.activeAccount?.toLowerCase() !== p.addresses.relayer.toLowerCase()) {
     throw new Error("Switch the wallet to the separate relayer account before continuing");
+  }
+  if (!state.walletChainId || BigInt(state.walletChainId) !== BigInt(p.chain.chainId)) {
+    throw new Error("Wallet network changed after signing. Discard this authorization and prepare a new one.");
   }
 
   const request = { from: p.addresses.relayer, to: p.token.address, data: state.calldata };
-  await wallet.request({ method: "eth_call", params: [request, "latest"] });
-  const gasEstimateHex = await wallet.request({ method: "eth_estimateGas", params: [request] });
-  const gasPriceHex = await wallet.request({ method: "eth_gasPrice" });
-  const relayerBeforeHex = await wallet.request({ method: "eth_getBalance", params: [p.addresses.relayer, "latest"] });
-  const victimBeforeHex = await wallet.request({ method: "eth_getBalance", params: [p.addresses.victim, "latest"] });
-  const estimate = asBigInt(gasEstimateHex);
-  const gasPrice = asBigInt(gasPriceHex);
-  const cushionWei = estimate * gasPrice * 2n;
-  const relayerBefore = asBigInt(relayerBeforeHex);
-  if (relayerBefore < cushionWei) throw new Error(`Relayer has ${formatNative(relayerBefore)}; estimated 2x fee cushion is ${formatNative(cushionWei)}`);
+  const checked = await api("/api/submission-check", {
+    chainKey: p.chain.key,
+    victim: p.addresses.victim,
+    destination: p.addresses.destination,
+    relayer: p.addresses.relayer,
+    amountBaseUnits: p.amount.baseUnits,
+    nonce: p.authorization.nonce,
+    calldata: state.calldata
+  });
+  const checkedState = checked.result;
+  state.submissionCheck = checkedState;
+  const estimate = asBigInt(checkedState.gas.estimatedUnits);
+  const gasPrice = asBigInt(checkedState.gas.gasPriceWei);
+  const relayerBefore = asBigInt(checkedState.balancesBefore.relayerNative);
+  const victimBefore = asBigInt(checkedState.balancesBefore.victimNative);
 
   const approved = window.confirm([
     `Broadcast on ${p.chain.name} MAINNET?`,
@@ -157,89 +158,106 @@ async function submitFromRelayer() {
   ].join("\n"));
   if (!approved) { setStatus("Broadcast cancelled before wallet transaction prompt."); return; }
 
-  await checkConnectedChain(p.chain.chainId);
-  const confirmedAccounts = await wallet.request({ method: "eth_accounts" });
-  if (!Array.isArray(confirmedAccounts) || confirmedAccounts[0]?.toLowerCase() !== p.addresses.relayer.toLowerCase()) {
-    throw new Error("Wallet account changed after confirmation; transaction was not sent");
+  if (state.activeAccount?.toLowerCase() !== p.addresses.relayer.toLowerCase() || BigInt(state.walletChainId ?? "0x0") !== BigInt(p.chain.chainId)) {
+    throw new Error("Wallet account or network changed after confirmation; transaction was not sent");
   }
 
   state.relayerBefore = relayerBefore.toString();
-  const hash = await wallet.request({ method: "eth_sendTransaction", params: [request] });
+  const hash = await wallet.request({ method: "eth_sendTransaction", params: [{ ...request, gas: `0x${estimate.toString(16)}` }] });
   if (typeof hash !== "string") throw new Error("Wallet did not return a transaction hash");
   state.txHash = hash;
-  setButtons();
-  show("result", { txHash: hash, from: p.addresses.relayer, to: p.token.address, relayerBalanceBeforeWei: state.relayerBefore, victimNativeBeforeWei: victimBeforeHex, broadcasted: true });
-  setStatus("Transaction submitted by the relayer wallet. Waiting for receipt.");
-  await waitForReceipt(hash);
-  const verified = await api("/api/verify", {
+  const verifyRequest = {
     chainKey: p.chain.key,
     txHash: hash,
     victim: p.addresses.victim,
     destination: p.addresses.destination,
     relayer: p.addresses.relayer,
     nonce: p.authorization.nonce,
-    amountBaseUnits: p.amount.baseUnits
-  });
-  if (verified.status === 202 || verified.result.pending) { setStatus("The RPC has not indexed the receipt yet. Click replay verification later or retry after a short wait."); return; }
-  const post = verified.result;
+    amountBaseUnits: p.amount.baseUnits,
+    calldata: state.calldata
+  };
+  state.verifyRequest = verifyRequest;
+  setButtons();
+  show("result", { txHash: hash, from: p.addresses.relayer, to: p.token.address, relayerBalanceBeforeWei: state.relayerBefore, victimNativeBeforeWei: victimBefore.toString(), broadcasted: true });
+  setStatus("Transaction submitted by the relayer wallet. Waiting for receipt.");
+  let post;
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    const verified = await api("/api/verify", verifyRequest);
+    if (!verified.result.pending) { post = verified.result; break; }
+    setStatus(`Waiting for the local runner to see the mainnet receipt… (${attempt + 1}/120)`);
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+  }
+  if (!post) { setStatus("Receipt wait timed out. Keep the transaction hash; it may still mine. Retry verification later."); return; }
   const victimNativeAfter = asBigInt(post.balancesAfter.victimNative);
-  const victimNativeBefore = asBigInt(victimBeforeHex);
+  const victimNativeBefore = victimBefore;
   const relayerNativeAfter = asBigInt(post.balancesAfter.relayerNative);
   const relayerSpend = relayerBefore - relayerNativeAfter;
-  show("result", {
-    ...post,
-    relayerNativeSpentWei: relayerSpend.toString(),
-    relayerNativeSpentEth: formatNative(relayerSpend),
-    victimNativeDeltaWei: (victimNativeAfter - victimNativeBefore).toString(),
-    victimPaidZeroNativeGas: victimNativeAfter === victimNativeBefore,
-    authorizationNonceConsumed: post.authorizationUsed,
-    signatureSentToServer: false,
-    note: "Balance-delta attribution assumes no unrelated transactions or deposits changed either account during this run. L2 account delta includes chain-specific fees when reflected by the RPC."
-  });
+  const victimNativeDelta = victimNativeAfter - victimNativeBefore;
+  const victimPaidZeroNativeGas = victimNativeDelta === 0n;
+  const relayerPaidGas = post.txFrom.toLowerCase() === p.addresses.relayer.toLowerCase() &&
+    BigInt(post.gasUsed) > 0n && BigInt(post.executionFeeWei ?? "0") > 0n;
+  state.transferProof = {
+    originalTransfer: "PASS — confirmed receipt contains the exact victim-to-destination USDC transfer",
+    txHash: state.txHash,
+    amount: `${p.amount.display} USDC`,
+    victimGasSpent: victimPaidZeroNativeGas ? "0 native ETH (PASS)" : `${victimNativeDelta.toString()} wei (FAIL — balance changed)`,
+    victimPaidZeroNativeGas,
+    relayerPaidGas: relayerPaidGas ? "PASS — relayer was the transaction sender and paid the receipt gas fee" : "FAIL — receipt does not prove the relayer paid gas",
+    relayerGas: {
+      sender: post.txFrom,
+      gasUsed: post.gasUsed,
+      effectiveGasPriceWei: post.effectiveGasPrice,
+      receiptExecutionFeeWei: post.executionFeeWei,
+      observedNativeBalanceSpendWei: relayerSpend.toString(),
+      observedNativeBalanceSpendEth: formatNative(relayerSpend)
+    },
+    nonceConsumedAtReceiptBlock: post.authorizationUsed,
+    authorizationUsedEvent: post.authorizationUsedEvent,
+    receiptBlockNumber: post.receiptBlockNumber,
+    receiptBlockTimestamp: post.receiptBlockTimestamp,
+    signatureSentToLocalRunner: true,
+    signaturePersisted: false,
+    note: "Relayer balance delta can include concurrent activity. The receipt identifies the relayer as sender and reports the gas fee; victim zero-gas proof uses its native balance delta."
+  };
+  show("result", state.transferProof);
   if (!post.authorizationUsed) throw new Error("Receipt exists but the USDC contract did not mark the authorization nonce used");
-  if (victimNativeAfter !== victimNativeBefore) setStatus("Receipt verified, but victim native balance changed during the measurement; inspect for concurrent activity before calling this a zero-gas proof.");
-  else setStatus("Receipt verified. Victim native balance delta is zero; relayer balance delta and receipt gas are shown. Replay-check button is ready.");
   setButtons();
+  setStatus("Original transfer confirmed. Immediately simulating the exact same authorization at its receipt block; no second transaction will be sent.");
+  await verifyReplayRejection();
 }
 
 async function verifyReplayRejection() {
-  if (!state.txHash || !state.calldata || !state.preflight) throw new Error("A successful authorization transaction is required first");
+  if (!state.txHash || !state.calldata || !state.preflight || !state.verifyRequest) throw new Error("A successful authorization transaction is required first");
   assertFormUnchanged();
-  const p = state.preflight;
-  const wallet = requireWallet();
-  await checkConnectedChain(p.chain.chainId);
-  const accounts = await wallet.request({ method: "eth_accounts" });
-  if (!Array.isArray(accounts) || accounts[0]?.toLowerCase() !== p.addresses.relayer.toLowerCase()) {
-    throw new Error("Select the relayer account for the read-only replay simulation");
-  }
-  let replayRejected = false;
   try {
-    await wallet.request({ method: "eth_call", params: [{ from: p.addresses.relayer, to: p.token.address, data: state.calldata }, "latest"] });
-  } catch {
-    replayRejected = true;
+    const replay = (await api("/api/replay-check", state.verifyRequest)).result;
+    const completePass = replay.pass && state.transferProof?.victimPaidZeroNativeGas && state.transferProof?.relayerPaidGas.startsWith("PASS");
+    show("result", {
+      ...state.transferProof,
+      nonceConsumed: replay.authorizationUsed ? "PASS — true at the original receipt block" : "FAIL — nonce was not marked used",
+      authorizationStillInsideOriginalValidityWindow: replay.authorizationInsideOriginalWindow
+        ? `PASS — receipt-block timestamp ${replay.replayBlockTimestamp} is after validAfter ${replay.validAfter} and before validBefore ${replay.validBefore}`
+        : `FAIL — receipt-block timestamp ${replay.replayBlockTimestamp} is outside validAfter ${replay.validAfter} and validBefore ${replay.validBefore}`,
+      replaySimulationRejected: replay.replayRejected ? "PASS — exact original calldata reverted in read-only eth_call" : "FAIL — replay simulation did not revert",
+      replayRejectedDueToConsumedNonce: replay.replayRejectedByConsumedNonce,
+      replayRevertReasonIdentifiesConsumedNonce: replay.revertIdentifiesConsumedNonce,
+      replaySimulationBlockNumber: replay.replayBlockNumber,
+      replayTransactionBroadcast: false,
+      replayProof: replay.pass ? "PASS — the consumed nonce caused replay rejection while the authorization remained inside its original validity window" : "FAIL — replay protection was not proven; no replay transaction was sent",
+      overallTransferAndReplay: completePass ? "PASS" : "PARTIAL — inspect individual checks above"
+    });
+    setStatus(completePass
+      ? "Original transfer PASS; victim gas spent = 0; relayer paid gas; nonce consumed; authorization still valid; same-authorization replay rejected by the consumed nonce. No second transaction was broadcast."
+      : "Original transfer confirmed; one or more gasless-transfer or in-window replay checks did not pass. No second transaction was broadcast.");
+  } catch (error) {
+    show("result", {
+      ...state.transferProof,
+      replayProof: "NOT PROVEN — immediate replay simulation did not complete",
+      replaySimulationError: error.message,
+      replayTransactionBroadcast: false
+    });
+    setStatus("Original transfer confirmed; immediate replay simulation did not complete. No second transaction was broadcast.");
   }
-  const verified = await api("/api/verify", {
-    chainKey: p.chain.key,
-    txHash: state.txHash,
-    victim: p.addresses.victim,
-    destination: p.addresses.destination,
-    relayer: p.addresses.relayer,
-    nonce: p.authorization.nonce,
-    amountBaseUnits: p.amount.baseUnits
-  });
-  if (verified.result.pending) throw new Error("Mainnet receipt is not available to verify");
-  const nonceConsumed = verified.result.authorizationUsed === true;
-  const withinSignedWindow = BigInt(verified.result.latestBlockTimestamp) < BigInt(p.authorization.validBefore);
-  const pass = replayRejected && nonceConsumed && withinSignedWindow;
-  show("result", {
-    replaySimulationRejected: replayRejected,
-    sameAuthorizationNonceConsumed: nonceConsumed,
-    replayStillInsideOriginalWindow: withinSignedWindow,
-    replayProof: pass ? "PASS — exact same signed calldata reverts under read-only eth_call while the original authorization window is still open, and the nonce is marked used" : "FAIL — do not claim replay protection from this run",
-    txHash: state.txHash,
-    transactionBroadcastForReplay: false
-  });
-  setStatus(pass ? "Replay rejected in eth_call; no replay transaction was broadcast." : "Replay proof did not pass. No second transaction was sent.");
 }
 
 async function initialize() {
@@ -261,18 +279,39 @@ $("dry-run").addEventListener("click", () => prepare(true).catch((error) => setS
 $("prepare").addEventListener("click", () => prepare(false).catch((error) => setStatus(error.message)));
 $("sign").addEventListener("click", () => signAuthorization().catch((error) => setStatus(error.message)));
 $("submit").addEventListener("click", () => submitFromRelayer().catch((error) => setStatus(error.message)));
-$("replay").addEventListener("click", () => verifyReplayRejection().catch((error) => setStatus(error.message)));
-$("chain").addEventListener("change", () => { state.preflight = null; state.signature = null; state.calldata = null; state.txHash = null; state.formSnapshot = null; setButtons(); });
-provider?.on?.("chainChanged", () => { state.signature = null; state.calldata = null; state.txHash = null; setButtons(); setStatus("Wallet chain changed. Re-run preflight before continuing."); });
+$("chain").addEventListener("change", () => { state.preflight = null; state.signature = null; state.calldata = null; state.txHash = null; state.submissionCheck = null; state.verifyRequest = null; state.transferProof = null; state.formSnapshot = null; setButtons(); });
+provider?.on?.("chainChanged", (chainId) => {
+  state.walletChainId = typeof chainId === "string" ? chainId : null;
+  if (state.preflight && !state.dryRun && BigInt(state.walletChainId ?? "0x0") !== BigInt(state.preflight.chain.chainId)) {
+    state.preflight = null;
+    state.signature = null;
+    state.calldata = null;
+    state.txHash = null;
+    state.submissionCheck = null;
+    state.verifyRequest = null;
+    state.transferProof = null;
+    state.formSnapshot = null;
+  }
+  setButtons();
+  setStatus("Wallet network changed. Any signed authorization for the previous network was discarded.");
+});
 provider?.on?.("accountsChanged", (accounts) => {
   const current = Array.isArray(accounts) ? accounts[0] : null;
-  if (current?.toLowerCase() !== state.preflight?.addresses.relayer.toLowerCase()) {
-    if (current?.toLowerCase() !== state.preflight?.addresses.victim.toLowerCase()) {
-      state.signature = null;
-      state.calldata = null;
-      setButtons();
-      setStatus("Wallet account changed. Reconnect victim and prepare a fresh authorization if needed.");
-    }
+  state.activeAccount = current;
+  const isParticipant = current && state.preflight && [state.preflight.addresses.victim, state.preflight.addresses.relayer]
+    .some((address) => address.toLowerCase() === current.toLowerCase());
+  if (state.preflight && !isParticipant) {
+    state.preflight = null;
+    state.signature = null;
+    state.calldata = null;
+    state.txHash = null;
+    state.submissionCheck = null;
+    state.verifyRequest = null;
+    state.formSnapshot = null;
+    setButtons();
+    setStatus("Wallet account changed to an address outside this test. Reconnect the victim and prepare a fresh authorization.");
+    return;
   }
+  setStatus(current ? `Wallet account changed to ${current}.` : "Wallet disconnected.");
 });
 initialize().catch((error) => setStatus(`Could not load runner config: ${error.message}`));
