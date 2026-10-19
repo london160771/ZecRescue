@@ -19,8 +19,9 @@ const createJobSchema = z.object({
 }).strict();
 const prepareSchema = z.object({
   amountBaseUnits: z.string().regex(/^\d{1,78}$/),
-  destination: addressSchema
+  zcashRecipient: z.string().regex(/^t1[1-9A-HJ-NP-Za-km-z]{33}$/)
 }).strict();
+const emptySchema = z.object({}).strict();
 const submitSchema = z.object({
   signature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
   idempotencyKey: idempotencySchema
@@ -70,7 +71,10 @@ const errorHandler: ErrorRequestHandler = (error: unknown, _request, response, _
     return;
   }
   if (error instanceof RescueServiceError) {
-    response.status(error.statusCode).json({ error: error.code });
+    response.status(error.statusCode).json({
+      error: error.code,
+      ...(error.details ? { details: error.details } : {})
+    });
     return;
   }
   if (typeof error === "object" && error !== null && "type" in error) {
@@ -114,8 +118,14 @@ export function createApiApp(repository: RescueJobRepository) {
   app.post("/api/v1/jobs/:jobId/:chain/authorization", async (request, response) => {
     const jobId = parseBody(z.string().uuid(), request.params.jobId);
     const chainKey = parseChain(request.params.chain);
+    parseBody(emptySchema, request.body);
+    response.json(await service.prepareAuthorization(jobId, chainKey));
+  });
+  app.post("/api/v1/jobs/:jobId/:chain/quote", async (request, response) => {
+    const jobId = parseBody(z.string().uuid(), request.params.jobId);
+    const chainKey = parseChain(request.params.chain);
     const body = parseBody(prepareSchema, request.body);
-    response.json(await service.prepareAuthorization(jobId, chainKey, body));
+    response.json(await service.createIntentQuote(jobId, chainKey, body));
   });
   app.post("/api/v1/jobs/:jobId/:chain/submit", async (request, response) => {
     const jobId = parseBody(z.string().uuid(), request.params.jobId);

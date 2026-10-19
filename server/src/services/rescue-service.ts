@@ -29,16 +29,29 @@ import {
 } from "../domain/authorization.js";
 import {
   canTransitionLeg,
+  type IntentQuoteSnapshot,
   type LegStatus,
   type RescueJob,
   type RescueLeg
 } from "../domain/jobs.js";
 import { nativeUsdcAbi } from "../evm/native-usdc-abi.js";
+import { isMainnetTransparentP2pkhAddress } from "../domain/zcash-address.js";
 import type { RescueJobRepository } from "../repositories/rescue-job-repository.js";
 import { parseSourceAddress, scanChainBalance, scanNativeUsdc } from "./balance-scanner.js";
+import {
+  NearIntentsClient,
+  NearIntentsError,
+  type NearIntentsGateway,
+  type NearToken,
+  type SignedNearQuote
+} from "./near-intents-client.js";
 
 export class RescueServiceError extends Error {
-  constructor(public readonly statusCode: number, public readonly code: string) {
+  constructor(
+    public readonly statusCode: number,
+    public readonly code: string,
+    public readonly details?: Record<string, string>
+  ) {
     super(code);
     this.name = "RescueServiceError";
   }
@@ -51,9 +64,11 @@ export type CreateJobInput = {
   idempotencyKey: string;
 };
 
-export type PrepareAuthorizationInput = {
+export type PrepareAuthorizationInput = Record<string, never>;
+
+export type CreateIntentQuoteInput = {
   amountBaseUnits: string;
-  destination: string;
+  zcashRecipient: string;
 };
 
 export type SubmitAuthorizationInput = {
@@ -100,11 +115,130 @@ function assertAuthorizationWindow(authorization: TransferAuthorization, blockTi
 }
 
 export class RescueService {
-  constructor(private readonly repository: RescueJobRepository) {}
+  constructor(
+    private readonly repository: RescueJobRepository,
+    private readonly nearIntents: NearIntentsGateway = new NearIntentsClient()
+  ) {}
 
   async scan(sourceAddress: string) {
     if (!isAddress(sourceAddress, { strict: false })) throw new RescueServiceError(400, "INVALID_SOURCE_ADDRESS");
     return scanNativeUsdc(sourceAddress, V1_CHAIN_KEYS);
+  }
+
+  async createIntentQuote(jobId: string, chainKey: ChainKey, input: CreateIntentQuoteInput) {
+    const job = await this.getJob(jobId);
+    const leg = getLeg(job, chainKey);
+    if (!/^[0-9]{1,78}$/.test(input.amountBaseUnits)) throw new RescueServiceError(400, "INVALID_AMOUNT_BASE_UNITS");
+    const amountBaseUnits = BigInt(input.amountBaseUnits);
+    if (amountBaseUnits <= 0n || amountBaseUnits > BigInt(leg.balanceAtScanBaseUnits)) {
+      throw new RescueServiceError(400, "AMOUNT_EXCEEDS_SCANNED_BALANCE");
+    }
+    if (!isMainnetTransparentP2pkhAddress(input.zcashRecipient)) {
+      throw new RescueServiceError(400, "TRANSPARENT_MAINNET_ZCASH_RECIPIENT_REQUIRED");
+    }
+
+    if (leg.status === "quoted" && leg.intentQuote) {
+      if (quoteExpiry(leg.intentQuote).getTime() > Date.now()) {
+        throw new RescueServiceError(409, "ACTIVE_QUOTE_ALREADY_EXISTS");
+      }
+      const expired = await this.repository.updateLeg(jobId, chainKey, ["quoted"], { status: "quote_expired" });
+      if (!expired) throw new RescueServiceError(409, "LEG_STATE_CHANGED");
+    }
+    const current = await this.getJob(jobId);
+    const currentLeg = getLeg(current, chainKey);
+    if (currentLeg.status !== "discovered" && currentLeg.status !== "quote_expired") {
+      throw new RescueServiceError(409, "LEG_NOT_QUOTABLE");
+    }
+
+    const config = RESCUE_CHAINS[chainKey];
+    let signedQuote: SignedNearQuote;
+    try {
+      const tokens = await this.nearIntents.getTokens();
+      const originAsset = exactUsdcAsset(tokens, chainKey, config.usdc);
+      const zecAsset = exactZecAsset(tokens);
+      signedQuote = await this.nearIntents.requestQuote({
+        amount: amountBaseUnits.toString(),
+        originAsset: originAsset.assetId,
+        destinationAsset: zecAsset.assetId,
+        refundTo: job.cleanRefundAddress,
+        recipient: input.zcashRecipient,
+        deadline: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+      });
+      validateSignedQuote(signedQuote, {
+        originAsset: originAsset.assetId,
+        destinationAsset: zecAsset.assetId,
+        amount: amountBaseUnits.toString(),
+        refundTo: job.cleanRefundAddress,
+        recipient: input.zcashRecipient
+      });
+    } catch (error) {
+      if (error instanceof RescueServiceError) throw error;
+      if (error instanceof NearIntentsError) {
+        if (error.code === "MINIMUM_AMOUNT_NOT_MET" && error.minimumAmountInBaseUnits) {
+          throw new RescueServiceError(422, error.code, { minimumAmountBaseUnits: error.minimumAmountInBaseUnits });
+        }
+        throw new RescueServiceError(502, error.code);
+      }
+      throw new RescueServiceError(502, "NEAR_INTENTS_UNAVAILABLE");
+    }
+
+    const depositAddress = signedQuote.quote.depositAddress;
+    if (!isAddress(depositAddress, { strict: false })) throw new RescueServiceError(502, "INVALID_PROVIDER_DEPOSIT_ADDRESS");
+    if (BigInt(signedQuote.quote.amountIn) !== amountBaseUnits) {
+      throw new RescueServiceError(502, "PROVIDER_INPUT_AMOUNT_MISMATCH");
+    }
+    const deadline = validDate(signedQuote.quote.deadline ?? signedQuote.quoteRequest.deadline);
+    const timeWhenInactive = signedQuote.quote.timeWhenInactive
+      ? validDate(signedQuote.quote.timeWhenInactive)
+      : undefined;
+    const snapshot: IntentQuoteSnapshot = {
+      correlationId: signedQuote.correlationId,
+      depositAddress: getAddress(depositAddress),
+      ...(signedQuote.quote.depositMemo ? { depositMemo: signedQuote.quote.depositMemo } : {}),
+      requestedAmountBaseUnits: amountBaseUnits.toString(),
+      slippageToleranceBps: 100,
+      amountInBaseUnits: signedQuote.quote.amountIn,
+      ...(signedQuote.quote.minAmountIn ? { minimumAmountInBaseUnits: signedQuote.quote.minAmountIn } : {}),
+      amountOutBaseUnits: signedQuote.quote.amountOut,
+      ...(signedQuote.quote.minAmountOut ? { minimumAmountOutBaseUnits: signedQuote.quote.minAmountOut } : {}),
+      ...(signedQuote.quote.amountInFormatted ? { amountInFormatted: signedQuote.quote.amountInFormatted } : {}),
+      ...(signedQuote.quote.amountOutFormatted ? { amountOutFormatted: signedQuote.quote.amountOutFormatted } : {}),
+      ...(signedQuote.quote.amountInUsd ? { amountInUsd: signedQuote.quote.amountInUsd } : {}),
+      ...(signedQuote.quote.amountOutUsd ? { amountOutUsd: signedQuote.quote.amountOutUsd } : {}),
+      ...(signedQuote.quote.refundFee ? { refundFeeBaseUnits: signedQuote.quote.refundFee } : {}),
+      ...(signedQuote.quote.withdrawFee ? { withdrawFeeBaseUnits: signedQuote.quote.withdrawFee } : {}),
+      deadline,
+      ...(timeWhenInactive ? { timeWhenInactive } : {}),
+      ...(signedQuote.quote.timeEstimate !== undefined ? { timeEstimateSeconds: signedQuote.quote.timeEstimate } : {})
+    };
+    if (snapshot.minimumAmountInBaseUnits && amountBaseUnits < BigInt(snapshot.minimumAmountInBaseUnits)) {
+      throw new RescueServiceError(422, "MINIMUM_AMOUNT_NOT_MET", {
+        minimumAmountBaseUnits: snapshot.minimumAmountInBaseUnits
+      });
+    }
+    if (quoteExpiry(snapshot).getTime() <= Date.now() + Number(AUTHORIZATION_TTL_SECONDS) * 1000 + 30_000) {
+      throw new RescueServiceError(409, "QUOTE_TOO_CLOSE_TO_EXPIRY");
+    }
+    const expectedStatuses = currentLeg.status === "discovered" ? ["discovered"] as const : ["quote_expired"] as const;
+    const updated = await this.repository.updateLeg(jobId, chainKey, expectedStatuses, {
+      status: "quoted",
+      amountBaseUnits: amountBaseUnits.toString(),
+      destination: snapshot.depositAddress as Address,
+      intentQuote: snapshot,
+      lastErrorCode: null,
+      providerStatus: null
+    });
+    if (!updated) throw new RescueServiceError(409, "LEG_STATE_CHANGED");
+    return {
+      jobId,
+      chain: { key: chainKey, chainId: config.chain.id, token: config.usdc },
+      recipient: input.zcashRecipient,
+      recipientType: "transparent-mainnet-zcash",
+      refundTo: job.cleanRefundAddress,
+      refundType: "ORIGIN_CHAIN",
+      quoteVerified: true,
+      quote: serializeIntentQuote(snapshot)
+    };
   }
 
   async createJob(input: CreateJobInput): Promise<{ job: RescueJob; created: boolean }> {
@@ -157,17 +291,22 @@ export class RescueService {
     return job;
   }
 
-  async prepareAuthorization(jobId: string, chainKey: ChainKey, input: PrepareAuthorizationInput) {
+  async prepareAuthorization(jobId: string, chainKey: ChainKey) {
     const job = await this.getJob(jobId);
     const leg = getLeg(job, chainKey);
-    if (leg.status !== "discovered") throw new RescueServiceError(409, "LEG_NOT_PREPARABLE");
-    if (!/^\d{1,78}$/.test(input.amountBaseUnits)) throw new RescueServiceError(400, "INVALID_AMOUNT_BASE_UNITS");
-    const amountBaseUnits = BigInt(input.amountBaseUnits);
+    if (leg.status !== "quoted" || !leg.intentQuote) throw new RescueServiceError(409, "LEG_NOT_PREPARABLE");
+    const quote = leg.intentQuote;
+    const latestUsableTime = Date.now() + Number(AUTHORIZATION_TTL_SECONDS) * 1000 + 30_000;
+    if (quoteExpiry(quote).getTime() <= latestUsableTime) {
+      await this.repository.updateLeg(jobId, chainKey, ["quoted"], { status: "quote_expired" });
+      throw new RescueServiceError(409, "QUOTE_EXPIRED_REFRESH_REQUIRED");
+    }
+    if (!isAddress(quote.depositAddress, { strict: false })) throw new RescueServiceError(502, "INVALID_PROVIDER_DEPOSIT_ADDRESS");
+    const amountBaseUnits = BigInt(quote.requestedAmountBaseUnits);
     if (amountBaseUnits <= 0n || amountBaseUnits > BigInt(leg.balanceAtScanBaseUnits)) {
       throw new RescueServiceError(400, "AMOUNT_EXCEEDS_SCANNED_BALANCE");
     }
-    if (!isAddress(input.destination, { strict: false })) throw new RescueServiceError(400, "INVALID_DESTINATION");
-    const destination = getAddress(input.destination);
+    const destination = getAddress(quote.depositAddress);
     if (destination.toLowerCase() === job.sourceAddress.toLowerCase() ||
         destination.toLowerCase() === job.cleanRefundAddress.toLowerCase()) {
       throw new RescueServiceError(400, "DESTINATION_MUST_BE_DISTINCT");
@@ -210,7 +349,7 @@ export class RescueService {
       chainTimestamp: block.timestamp,
       nonce
     });
-    const updated = await this.repository.updateLeg(jobId, chainKey, ["discovered"], {
+    const updated = await this.repository.updateLeg(jobId, chainKey, ["quoted"], {
       status: "awaiting_authorization",
       amountBaseUnits: amountBaseUnits.toString(),
       destination,
@@ -230,7 +369,8 @@ export class RescueService {
       types: prepared.types,
       victimPaysNativeGas: false,
       expiresInSeconds: Number(AUTHORIZATION_TTL_SECONDS),
-      signatureStored: false
+      signatureStored: false,
+      quote: serializeIntentQuote(quote)
     };
   }
 
@@ -333,14 +473,76 @@ export class RescueService {
   async refreshJob(jobId: string): Promise<RescueJob> {
     let job = await this.getJob(jobId);
     for (const leg of job.legs) {
-      if (leg.status === "submitted" && leg.transactionHash) {
-        job = await this.refreshSubmittedLeg(job, leg);
-      } else if (leg.status === "submitting" ||
-          (leg.status === "needs_review" && ["SUBMISSION_RESULT_UNCERTAIN", "SUBMISSION_UNKNOWN_NONCE_UNUSED"].includes(leg.lastErrorCode ?? ""))) {
-        job = await this.reconcileUncertainSubmission(job, leg);
+      let currentLeg = getLeg(job, leg.chainKey);
+      if (currentLeg.status === "submitted" && currentLeg.transactionHash) {
+        job = await this.refreshSubmittedLeg(job, currentLeg);
+      } else if (currentLeg.status === "submitting" ||
+          (currentLeg.status === "needs_review" && ["SUBMISSION_RESULT_UNCERTAIN", "SUBMISSION_UNKNOWN_NONCE_UNUSED"].includes(currentLeg.lastErrorCode ?? ""))) {
+        job = await this.reconcileUncertainSubmission(job, currentLeg);
       }
+      currentLeg = getLeg(job, leg.chainKey);
+      job = await this.refreshIntentLeg(job, currentLeg);
     }
     return job;
+  }
+
+  private async refreshIntentLeg(job: RescueJob, leg: RescueLeg): Promise<RescueJob> {
+    if (leg.status === "quoted" && leg.intentQuote && quoteExpiry(leg.intentQuote).getTime() <= Date.now()) {
+      return await this.repository.updateLeg(job.jobId, leg.chainKey, ["quoted"], { status: "quote_expired" }) ?? job;
+    }
+    if (!leg.intentQuote || (leg.status !== "source_confirmed" && leg.status !== "converting" && leg.status !== "under_review")) {
+      return job;
+    }
+    const quote = leg.intentQuote;
+    if (leg.status === "source_confirmed") {
+      const started = await this.repository.updateLeg(job.jobId, leg.chainKey, ["source_confirmed"], {
+        status: "converting",
+        lastErrorCode: null
+      });
+      if (!started) return job;
+      job = started;
+      leg = getLeg(job, leg.chainKey);
+    }
+
+    try {
+      const status = await this.nearIntents.getStatus(quote.depositAddress, quote.depositMemo);
+      const signedQuote = status.quoteResponse;
+      if (signedQuote.correlationId !== quote.correlationId ||
+          signedQuote.quote.depositAddress.toLowerCase() !== quote.depositAddress.toLowerCase()) {
+        return await this.repository.updateLeg(job.jobId, leg.chainKey, [leg.status], {
+          status: "needs_review",
+          lastErrorCode: "PROVIDER_STATUS_QUOTE_MISMATCH"
+        }) ?? job;
+      }
+
+      const providerStatus = status.status.toUpperCase();
+      let targetStatus: LegStatus | undefined;
+      if (providerStatus === "UNDER_REVIEW") targetStatus = "under_review";
+      else if (providerStatus === "REFUNDED") targetStatus = "refunded";
+      else if (providerStatus === "FAILED") targetStatus = "failed";
+      else if (["PENDING_DEPOSIT", "KNOWN_DEPOSIT_TX", "INCOMPLETE_DEPOSIT", "PROCESSING", "SUCCESS"].includes(providerStatus)) {
+        targetStatus = "converting";
+      } else {
+        targetStatus = "needs_review";
+      }
+      const patch = {
+        ...(targetStatus !== leg.status ? { status: targetStatus } : {}),
+        providerStatus,
+        lastErrorCode: targetStatus === "needs_review" ? "UNRECOGNIZED_PROVIDER_STATUS" : null
+      };
+      return await this.repository.updateLeg(job.jobId, leg.chainKey, [leg.status], patch) ?? job;
+    } catch (error) {
+      const code = error instanceof NearIntentsError ? error.code : "NEAR_INTENTS_STATUS_UNAVAILABLE";
+      if (code === "INVALID_PROVIDER_SIGNATURE" || code === "INVALID_PROVIDER_RESPONSE") {
+        return await this.repository.updateLeg(job.jobId, leg.chainKey, [leg.status], {
+          status: "needs_review",
+          lastErrorCode: code
+        }) ?? job;
+      }
+      return await this.repository.updateLeg(job.jobId, leg.chainKey, [leg.status], {
+        lastErrorCode: code
+      }) ?? job;
+    }
   }
 
   private async refreshSubmittedLeg(job: RescueJob, leg: RescueLeg): Promise<RescueJob> {
@@ -427,6 +629,55 @@ function cryptoRandomHex32(): string {
   return randomBytes(32).toString("hex");
 }
 
+function exactUsdcAsset(tokens: NearToken[], chainKey: ChainKey, contractAddress: Address): NearToken {
+  const blockchain = chainKey === "base" ? "base" : "arb";
+  const matches = tokens.filter((token) => token.blockchain === blockchain &&
+    token.symbol.toUpperCase() === "USDC" && token.decimals === 6 &&
+    token.contractAddress?.toLowerCase() === contractAddress.toLowerCase());
+  if (matches.length !== 1) throw new RescueServiceError(409, "NATIVE_USDC_ROUTE_UNAVAILABLE");
+  return matches[0]!;
+}
+
+function exactZecAsset(tokens: NearToken[]): NearToken {
+  const matches = tokens.filter((token) => token.blockchain === "zec" && token.symbol.toUpperCase() === "ZEC");
+  if (matches.length !== 1) throw new RescueServiceError(409, "TRANSPARENT_ZEC_ROUTE_UNAVAILABLE");
+  return matches[0]!;
+}
+
+function validateSignedQuote(
+  quote: SignedNearQuote,
+  expected: { originAsset: string; destinationAsset: string; amount: string; refundTo: Address; recipient: string }
+): void {
+  const request = quote.quoteRequest;
+  if (request.dry !== false || request.swapType !== "EXACT_INPUT" || request.slippageTolerance !== 100 ||
+      request.depositType !== "ORIGIN_CHAIN" || request.refundType !== "ORIGIN_CHAIN" ||
+      request.recipientType !== "DESTINATION_CHAIN" ||
+      request.originAsset !== expected.originAsset || request.destinationAsset !== expected.destinationAsset ||
+      request.amount !== expected.amount || request.refundTo.toLowerCase() !== expected.refundTo.toLowerCase() ||
+      request.recipient !== expected.recipient) {
+    throw new RescueServiceError(502, "PROVIDER_QUOTE_BINDING_MISMATCH");
+  }
+}
+
+function validDate(value: string): Date {
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds)) throw new RescueServiceError(502, "INVALID_PROVIDER_EXPIRY");
+  return new Date(milliseconds);
+}
+
+function quoteExpiry(quote: IntentQuoteSnapshot): Date {
+  return quote.timeWhenInactive ?? quote.deadline;
+}
+
+function serializeIntentQuote(quote: IntentQuoteSnapshot) {
+  return {
+    ...quote,
+    deadline: quote.deadline.toISOString(),
+    ...(quote.timeWhenInactive ? { timeWhenInactive: quote.timeWhenInactive.toISOString() } : {}),
+    expiresAt: quoteExpiry(quote).toISOString()
+  };
+}
+
 export function serializeRescueJob(job: RescueJob) {
   return {
     jobId: job.jobId,
@@ -443,6 +694,8 @@ export function serializeRescueJob(job: RescueJob) {
       status: leg.status,
       amountBaseUnits: leg.amountBaseUnits,
       destination: leg.destination,
+      intentQuote: leg.intentQuote ? serializeIntentQuote(leg.intentQuote) : undefined,
+      providerStatus: leg.providerStatus,
       authorization: leg.authorization,
       transactionHash: leg.transactionHash,
       receiptGasCostWei: leg.receiptGasCostWei,

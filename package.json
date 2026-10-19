@@ -17,11 +17,12 @@
     "phase0:mainnet": "tsc -p phase0/tsconfig.runner.json && node --env-file-if-exists=.env dist/phase0-runner/scripts/mainnet-runner-server.js"
   },
   "dependencies": {
+    "@defuse-protocol/one-click-sdk-typescript": "0.1.25",
     "express": "5.2.1",
     "express-rate-limit": "8.7.1",
     "helmet": "8.3.0",
     "mongoose": "8.24.3",
-    "viem": "2.37.9",
+    "viem": "2.57.7",
     "zod": "4.6.7"
   },
   "devDependencies": {
@@ -31,7 +32,7 @@
     "eslint": "9.35.0",
     "tsx": "4.20.6",
     "typescript": "5.9.3",
-    "typescript-eslint": "8.44.0",
-    "vitest": "3.2.4"
+    "typescript-eslint": "8.71.2",
+    "vitest": "5.0.5"
   }
 }

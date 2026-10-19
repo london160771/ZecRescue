@@ -1,6 +1,6 @@
 import mongoose, { Schema, model, type Model } from "mongoose";
 import type { ChainKey } from "../config/chains.js";
-import { canTransitionLeg, type LegPatch, type LegStatus, type RescueJob } from "../domain/jobs.js";
+import { canTransitionLeg, type IntentQuoteSnapshot, type LegPatch, type LegStatus, type RescueJob } from "../domain/jobs.js";
 import type { RescueJobRepository } from "./rescue-job-repository.js";
 
 const authorizationSchema = new Schema({
@@ -12,6 +12,27 @@ const authorizationSchema = new Schema({
   nonce: { type: String, required: true }
 }, { _id: false, strict: "throw" });
 
+const intentQuoteSchema = new Schema<IntentQuoteSnapshot>({
+  correlationId: { type: String, required: true },
+  depositAddress: { type: String, required: true },
+  depositMemo: { type: String },
+  requestedAmountBaseUnits: { type: String, required: true },
+  slippageToleranceBps: { type: Number, required: true },
+  amountInBaseUnits: { type: String, required: true },
+  minimumAmountInBaseUnits: { type: String },
+  amountOutBaseUnits: { type: String, required: true },
+  minimumAmountOutBaseUnits: { type: String },
+  amountInFormatted: { type: String },
+  amountOutFormatted: { type: String },
+  amountInUsd: { type: String },
+  amountOutUsd: { type: String },
+  refundFeeBaseUnits: { type: String },
+  withdrawFeeBaseUnits: { type: String },
+  deadline: { type: Date, required: true },
+  timeWhenInactive: { type: Date },
+  timeEstimateSeconds: { type: Number }
+}, { _id: false, strict: "throw" });
+
 const rescueLegSchema = new Schema({
   chainKey: { type: String, enum: ["base", "arbitrum"], required: true },
   chainId: { type: Number, required: true },
@@ -20,7 +41,7 @@ const rescueLegSchema = new Schema({
   status: {
     type: String,
     enum: [
-      "discovered", "awaiting_authorization", "submitting", "submitted", "source_confirmed",
+      "discovered", "quoted", "quote_expired", "awaiting_authorization", "submitting", "submitted", "source_confirmed",
       "converting", "under_review", "zec_received", "shielding", "completed", "refunded", "failed", "needs_review"
     ],
     required: true
@@ -28,6 +49,8 @@ const rescueLegSchema = new Schema({
   amountBaseUnits: { type: String },
   destination: { type: String },
   authorization: { type: authorizationSchema },
+  intentQuote: { type: intentQuoteSchema },
+  providerStatus: { type: String },
   preparedAtBlock: { type: String },
   idempotencyKeyHash: { type: String },
   transactionHash: { type: String },

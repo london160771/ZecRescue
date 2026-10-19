@@ -10,6 +10,8 @@ export type StoredTransferAuthorization = Omit<TransferAuthorization, "value" | 
 
 export type LegStatus =
   | "discovered"
+  | "quoted"
+  | "quote_expired"
   | "awaiting_authorization"
   | "submitting"
   | "submitted"
@@ -23,6 +25,27 @@ export type LegStatus =
   | "failed"
   | "needs_review";
 
+export type IntentQuoteSnapshot = {
+  correlationId: string;
+  depositAddress: string;
+  depositMemo?: string;
+  requestedAmountBaseUnits: string;
+  slippageToleranceBps: number;
+  amountInBaseUnits: string;
+  minimumAmountInBaseUnits?: string;
+  amountOutBaseUnits: string;
+  minimumAmountOutBaseUnits?: string;
+  amountInFormatted?: string;
+  amountOutFormatted?: string;
+  amountInUsd?: string;
+  amountOutUsd?: string;
+  refundFeeBaseUnits?: string;
+  withdrawFeeBaseUnits?: string;
+  deadline: Date;
+  timeWhenInactive?: Date;
+  timeEstimateSeconds?: number;
+};
+
 export type RescueLeg = {
   chainKey: ChainKey;
   chainId: number;
@@ -32,6 +55,8 @@ export type RescueLeg = {
   amountBaseUnits?: string;
   destination?: Address;
   authorization?: StoredTransferAuthorization;
+  intentQuote?: IntentQuoteSnapshot;
+  providerStatus?: string;
   preparedAtBlock?: string;
   idempotencyKeyHash?: Hex;
   transactionHash?: Hex;
@@ -51,13 +76,16 @@ export type RescueJob = {
   legs: RescueLeg[];
 };
 
-export type LegPatch = Partial<Omit<RescueLeg, "chainKey" | "chainId" | "tokenAddress" | "balanceAtScanBaseUnits" | "lastErrorCode" | "receiptGasCostWei">> & {
+export type LegPatch = Partial<Omit<RescueLeg, "chainKey" | "chainId" | "tokenAddress" | "balanceAtScanBaseUnits" | "lastErrorCode" | "receiptGasCostWei" | "providerStatus">> & {
   lastErrorCode?: string | null;
   receiptGasCostWei?: string | null;
+  providerStatus?: string | null;
 };
 
 export const allowedLegTransitions: Record<LegStatus, readonly LegStatus[]> = {
-  discovered: ["awaiting_authorization", "failed"],
+  discovered: ["quoted", "failed"],
+  quoted: ["awaiting_authorization", "quote_expired", "failed"],
+  quote_expired: ["quoted", "failed"],
   awaiting_authorization: ["submitting", "failed"],
   submitting: ["submitted", "needs_review", "failed"],
   submitted: ["source_confirmed", "needs_review", "failed"],

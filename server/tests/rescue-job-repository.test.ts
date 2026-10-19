@@ -31,12 +31,14 @@ describe("rescue job repository", () => {
     await repository.create(job);
 
     const claim = await repository.updateLeg(job.jobId, "base", ["discovered"], {
-      status: "awaiting_authorization",
+      status: "quoted",
       amountBaseUnits: "10000",
       destination: "0x3333333333333333333333333333333333333333" as Address
     });
-    expect(claim?.legs[0]?.status).toBe("awaiting_authorization");
-    expect(await repository.updateLeg(job.jobId, "base", ["discovered"], { status: "awaiting_authorization" })).toBeNull();
+    expect(claim?.legs[0]?.status).toBe("quoted");
+    expect(await repository.updateLeg(job.jobId, "base", ["discovered"], { status: "quoted" })).toBeNull();
+    const prepared = await repository.updateLeg(job.jobId, "base", ["quoted"], { status: "awaiting_authorization" });
+    expect(prepared?.legs[0]?.status).toBe("awaiting_authorization");
     await expect(repository.updateLeg(job.jobId, "base", ["awaiting_authorization"], { status: "completed" })).rejects.toThrow("Invalid rescue leg transition");
   });
 
