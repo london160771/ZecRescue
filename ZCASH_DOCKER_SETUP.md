@@ -1,4 +1,4 @@
-# Zcash setup decision — no Docker full node
+# Zcash setup decision — light client only
 
 **Current decision: do not follow a Zebra/Zallet Docker setup.** This filename is retained for compatibility with older links; this document supersedes the former full-node instructions.
 
@@ -27,6 +27,6 @@ Web app → loopback-only zecrescue-agent
 
 The repository now contains a loopback-only `zecrescue-agent` with a fixed-command Zingolib CLI adapter. It requires an existing `zingo-wallet.dat`, refuses to initialize a wallet, and keeps the path-to-chain association in a local git-ignored manifest with no EVM address. The user must close Zingo PC before the CLI uses the same directory. No live wallet connection was tested by this code change.
 
-Receiver generation and incoming status are available only when configured; the CLI response schema and installed-wallet compatibility remain unverified. The current public CLI documentation says quickshield targets Ironwood, but its current shield implementation source still uses an Orchard selector and consumes eligible transparent account outputs without selecting an individual source path. The agent therefore disables shield preparation, local signing, broadcast, Ironwood receiver claims, and withdrawals. Do not mark these operations complete until a wallet-layer build proves separate Base/Arbitrum inputs and the exact Ironwood destination. Never proxy arbitrary wallet RPC to a hosted server.
+Receiver and status commands are enabled only when the configured executable reports exactly `zingolib_v6.0.0`; that source-derived gate does not prove wallet compatibility or live behavior. The pinned v6.0.0 source documents `shield` as a non-broadcasting proposal into Ironwood followed by `confirm`; `quickshield` combines shielding and transmission. The upstream CLI manages UTXOs automatically and does not allow manual source-address selection, and the v6 command uses account 0. Base and Arbitrum inputs could therefore be combined. The agent disables shield preparation, local signing, broadcast, Ironwood receiver claims, and withdrawals until a safe source-isolation design and exact local wallet flow are verified. Never proxy arbitrary wallet RPC to a hosted server.
 
 Ironwood is the product's intended pool terminology. Follow the current wallet's actual API names and status; do not invent an `ironwood` RPC method or selector. Do not describe transparent receipts as private before shield completion.

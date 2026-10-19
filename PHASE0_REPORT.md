@@ -139,9 +139,9 @@ MongoDB/Atlas is the selected backend database. Persist only job/leg orchestrati
 
 Until those funded steps complete, the project is **CONDITIONAL PASS / PENDING FINAL PHASE 0 FUNDED VALIDATION**. No core result may be represented as completed based only on mocks, docs, dry quotes, or wallet UI.
 
-## Post-Phase-6 implementation status
+## Implementation and phase-acceptance status
 
-Phases 1–6 have now been implemented and locally verified. The Phase 6 frontend is a real API-driven workflow; it does not replace or upgrade the evidence above. No mainnet signature, broadcast, contract deployment, provider deposit, or Zcash transaction was performed as part of Phases 1–6. The final funded Base/Arbitrum conversion, ZEC receipt detection, Ironwood-compatible shielding, and end-to-end checks remain **PENDING FINAL PHASE 0 FUNDED VALIDATION** and require explicit user approval. Production relayer use remains blocked by the undeployed/unaudited router and uncalibrated fixed-USDC reimbursement policy; Zcash shield/sign/broadcast remains disabled until the local light-wallet integration is proven.
+Phase 1, Phase 2, and Phase 4–6 implementation code and local verification are present, but **Phases 1–6 are not yet an accepted complete delivery** because Phase 3 remains partial: no local Zingolib CLI has been tested with the user's wallet, and the current documented CLI cannot isolate transparent inputs by source receiver. The Phase 6 frontend is a real API-driven workflow, but it does not replace this missing local wallet capability. No mainnet signature, broadcast, contract deployment, provider deposit, or Zcash transaction was performed as part of the code implementation. The funded Base/Arbitrum conversion, ZEC receipt detection, Ironwood-compatible shielding, and end-to-end checks remain **PENDING FINAL PHASE 0 FUNDED VALIDATION** and require explicit user approval after Phase 6 passes. Production relayer use also remains blocked by the undeployed/unaudited router and uncalibrated fixed-USDC reimbursement policy; Zcash shield/sign/broadcast remains disabled until a source-isolated local light-wallet integration is proven.
 
 ## Sources
 

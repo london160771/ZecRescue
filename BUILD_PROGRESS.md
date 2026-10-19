@@ -1,6 +1,6 @@
 # ZecRescue build progress
 
-**Current phase:** Phase 6 — UI and demo (implementation complete)
+**Current phase:** Phase 3 — Zcash Recovery Vault (local wallet integration blocked)
 **Locked product scope:** Base + Arbitrum, native Circle USDC. Optimism deferred.
 **Safety gate:** No real-money signing, broadcasting, deployments, or funded tests during Phases 1–6 without explicit user approval.
 
@@ -36,7 +36,7 @@
 
 ## Phase 3 — Zcash Recovery Vault
 
-**Status:** Code-level agent implementation complete with explicit capability blockers; live wallet integration and shielding remain unproven.
+**Status:** Partial; Phase 3 is not complete. The code-level receiver/status adapter is source-reviewed, but live wallet compatibility, detection, source-isolated shielding, local signing, and broadcast have not been implemented and verified.
 
 - **Implementation:** Added a loopback-only `zecrescue-agent` with a random 256-bit pairing token, exact configured origin allowlist, loopback Host validation, bearer auth, strict JSON schemas, 8 KB body cap, rate limits, and fixed Zingolib CLI command invocation without a shell. Agent requires an existing non-empty `zingo-wallet.dat`, only uses Mainnet arguments, serializes wallet subprocess operations, strips `ZINGO_SEED`/unrelated environment values, and keeps the path ID/chain/public receiver in a local git-ignored manifest. Implemented local transparent receive-path creation and exact-path coin inspection; no seed/key input or arbitrary RPC/command proxy exists.
 - **Capability gate:** Shield preparation, signing, broadcasting, Ironwood receiver claims, and withdrawals return explicit blocked/501 states. A later source check corrected the earlier Orchard-selector finding: official Zingolib v6.0.0 documents `shield` proposals into Ironwood followed by `confirm`, while `quickshield` transmits immediately. The CLI still selects transparent inputs at account scope, so per-source isolation remains unproven. No operation is advertised as live-proven. Agent CLI response schemas and compatibility with the user's current Zingo PC wallet file are still unverified.
@@ -48,7 +48,7 @@
 
 ## Phase 4 — Multi-chain orchestration
 
-**Status:** Implemented and locally verified; live chain/provider/wallet behavior remains unverified per Phase 0 gates.
+**Status:** Implementation and local tests are present; Phase 4 acceptance is pending Phase 3 completion and integrated verification.
 
 - **Implementation:** Added `POST /api/v1/workflows` to create one idempotent workflow scanning both Base and Arbitrum, and `GET /api/v1/workflows/:jobId` to refresh both independent legs. Every serialized job now includes a derived overall state, per-chain stage and next action, and explicit unverified ZEC/shield state. Provider `SUCCESS` remains `provider_done_zec_unverified`; it never marks ZEC received or shielded. Quote expiry requires a fresh quote on that leg. Failure and refund on one leg do not stop refresh/status of the other.
 - **Recovery behavior:** No automatic retry or rebroadcast occurs for failed, refunded, or uncertain legs. `quote_expired` may request a fresh quote using the existing quote endpoint. Uncertain source submissions continue through nonce/event reconciliation. Agent receive-path mappings now survive agent restart in a local manifest that stores no EVM address and is ignored by Git; chain paths remain independent.
@@ -60,7 +60,7 @@
 
 ## Phase 5 — Production hardening
 
-**Status:** Implemented and locally verified. Mainnet deployment and production reimbursement calibration are deliberately not claimed.
+**Status:** Implementation and local tests are present; Phase 5 acceptance is pending Phase 3 completion and integrated verification. Mainnet deployment and production reimbursement calibration are deliberately not claimed.
 
 - **Implementation:** Added a minimal `RescueRouter` that uses Circle `receiveWithAuthorization` plus a second owner-signed, chain/router-specific EIP-712 route consent. It binds the exact native USDC token, total amount, NEAR deposit, relayer, fixed reimbursement, 300-second window, and both nonces. It reimburses and forwards the exact remainder atomically. The contract has no owner, upgrade, arbitrary call, or sweep. The server verifies router code hash/token/TTL, quote and signature bindings, both nonce states, exact simulation, minimum rescue amount, configured reimbursement and gas ceilings, and a 2x relayer balance reserve. Base gas estimates include OP Stack L1-data/operator estimates with headroom; Arbitrum uses the network's combined estimate. Base receipt gas is recorded only if L1 fee data is returned. Added a Mongo-backed hashed-key rate-limit store and tighter signature, request, and quote-expiry checks.
 - **Privacy/security:** Signatures are request-only and never persisted. Mongo adds only the signed route parameters and estimated gas accounting; no Zcash wallet identity or keys are added. A regression now rejects a signature window more than 300 seconds ahead, even if its duration is short. No contract was deployed and no RPC write, wallet signature, or real token movement occurred.
@@ -71,7 +71,7 @@
 
 ## Phase 6 — UI and demo
 
-**Status:** Implemented, verified, and ready for review. This does not mean the funded end-to-end product is validated.
+**Status:** UI implementation and local checks are present; Phase 6 acceptance is pending Phase 3 completion and integrated verification. This does not mean the funded end-to-end product is validated.
 
 - **Implementation:** Added the responsive React/Vite/TypeScript/Tailwind application with Base and Arbitrum wallet connection, API-mediated balance scan, clean refund address, independent native-USDC quotes, recipient/minimum/fee/expiry display, exact authorization/reimbursement summary, both wallet signatures, explicit relayer confirmation, source/provider status tracking, explorer links, and partial/review/refund/error states. Added the local-agent capability boundary and separate per-chain transparent receiver entry. Unsupported Zcash receipt/shield capabilities remain blocked and visible. Added Vite local API proxy, Vercel build config, and public frontend config variables.
 - **Security/privacy:** Browser EVM transports reject RPC calls; all EVM reads and simulations stay server-side. The UI sends public wallet/quote fields to the API only as required by the flow. EIP-712 signatures stay in React memory until explicit submission and are cleared on disconnect/address change, expiry, and submit. Local-agent token is sent only to a validated loopback origin and not to hosted APIs. Health responses must identify both supported chains, preventing an HTML SPA fallback from appearing as API success. No secrets were found in the frontend/config changes; `.env` remains ignored. No wallet signature, transaction, provider deposit, deployment, or Zcash action was performed.
@@ -103,3 +103,11 @@
 - **Major review:** The version output is a compatibility signal only. A clean v6.0.0 string does not prove wallet-file compatibility or successful status data. The exact local CLI and a separate wallet copy must be tested before relying on receiver/status results. Upstream Zingolib documentation confirms automatic UTXO management without manual source-address selection; account-level shielding leaves source isolation unresolved, so no shielding implementation or success claim was added.
 - **Commit:** `186fadcd908010dfaf683f14016f8d8312ab41c5` (`fix: gate Zingo wallet commands by CLI version`).
 - **Unresolved / next manual action:** User must choose and prepare a backed-up local Zingo wallet copy, install the pinned CLI locally, and set `ZINGO_CLI_PATH` and `ZINGO_DATA_DIR` in ignored `.env`; never share recovery words or copy the wallet into the repository. Then the agent can be tested against that wallet with Zingo PC closed. A source-isolated shielding architecture still needs to be established before Phase 3 can pass.
+
+## Phase acceptance audit — 2026-10-19
+
+- **Correction:** Updated the top-level progress marker to Phase 3. Phases 4–6 code exists and its local checks pass, but these phases are not accepted as sequentially complete while Phase 3's local wallet integration is partial. Corrected the report's former broad statement that all six phases were complete.
+- **Architecture docs:** Replaced stale Orchard-selector wording in `ZCASH_DOCKER_SETUP.md` with the pinned v6.0.0 Ironwood proposal/confirm behavior and the automatic UTXO-selection limitation. The file remains an explicit no-full-node decision; it no longer serves as Docker install instructions.
+- **Evidence:** The current official Zingolib README says the CLI automatically manages UTXOs and does not manually select source addresses; the pinned v6.0.0 command code uses account 0 for shield proposals. Receiver/status commands remain version-gated but unverified against the user's actual wallet. Sources are in `PHASE0_REPORT.md`.
+- **Verification:** Documentation-only change; `git diff --check` passed. No CLI, wallet file, key material, or funds were accessed.
+- **Unresolved:** Phase 3 still needs a local CLI and user-prepared private wallet copy for runtime verification, plus a source-isolation design. Funded Phase 0 validation remains deferred until after Phase 6 and explicit user approval.
