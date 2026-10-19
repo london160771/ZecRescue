@@ -31,10 +31,14 @@
 - **Privacy/security:** The submitted signature remains transient. The Zcash recipient is passed to the provider and returned to the caller but excluded from MongoDB. Mongo persists only signed-quote routing/status metadata required to prepare the EIP-3009 transfer and poll the provider. The deposit destination must match the signed quote; the EIP-3009 amount and destination are derived from that quote, not accepted again from the submitter. The provider route is documented as transparent ZEC; the service does not claim shielding or ZEC receipt from provider `SUCCESS` alone.
 - **Verification:** `npm test` — 23 passed; `npm run typecheck` — passed; `npm run lint` — passed; `npm run build:api` — passed; `git diff --check` — passed. Test fixtures are synthetic and exercise local validation/state logic only. The environment cannot reach `1click.chaindefuser.com`; no live quote was requested and no funds were moved. Registry audit retry was blocked by network policy.
 - **Major review checkpoint:** Reviewed mainnet `t1` checksum/network validation, dynamic token matching against native Circle USDC contracts, quote request and response binding, official quote-signature validation, short EIP-3009 lifetime versus provider expiry, clean-origin refund binding, lack of persisted Zcash receiver/signature, strict Mongo schema, and status mapping. Tightened tests to use a synthetic receiver rather than the user's previously shared public address. No real wallet signature or chain write was performed.
-- **Commit:** Pending.
+- **Commit:** `c95847e` (`feat: implement Phase 2 conversion orchestration`).
 - **Unresolved:** Live 1Click API behavior and current account authentication, Base/Arbitrum live quote results through this API client, actual refund behavior, quote-expiry race handling under provider load, and funded conversion remain unproven. These are retained as live validation requirements; no provider error is represented as success.
 
-## Phases 3–6
+## Phase 3 — Zcash Recovery Vault
+
+**Status:** Next.
+
+## Phases 4–6
 
 Not started. Each phase will be recorded and committed separately after its implementation, checks, security/privacy review, and major checkpoint.
 
