@@ -92,4 +92,4 @@
 - **Verification:** `npm test` — 51 passed (14 files); `npm run typecheck` — passed; `npm run lint` — passed; `npm run build:web` — passed; `npm run build:api` — passed; `npm run build:agent` — passed; `npm run build:contracts` — compiled all three contracts; `git diff --check` — passed.
 - **Security review:** Tests exercise consent validation with an in-process test provider. No wallet file was opened, lightwalletd sync was not attempted, and no funds, keys, signatures, or transactions were involved.
 - **Unresolved:** The current installed Zingolib build, wallet sync schema, source-isolated shielding, Ironwood destination, and local signing/broadcast path remain unverified and disabled. Final funded validation remains pending user approval.
-- **Commit:** Pending.
+- **Implementation commit:** `bf43707` (`fix: require consent before Zcash wallet sync`).
