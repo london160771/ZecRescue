@@ -105,6 +105,7 @@ export type AgentCapabilities = {
   network: "mainnet";
   walletLayer: "not_configured" | "zingo_cli";
   walletFilePresent: boolean;
+  zingoVersion: string | null;
   verification: "not_configured" | "source_review_only" | "verified";
   canGenerateTransparentReceiver: boolean;
   canMonitorReceiver: boolean;

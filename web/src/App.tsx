@@ -251,15 +251,15 @@ function App() {
       if (!agentToken.trim()) throw new Error("Enter the local companion token from its terminal. It stays in this browser tab and is never sent to the hosted API.");
       const caps = await getAgentCapabilities(agentToken.trim());
       setAgentCapabilities(caps);
-      setNotice(caps.verification === "verified"
-        ? "Local wallet layer verified. Receiver tools are available for this session."
-        : "Local companion is reachable, but its wallet commands are not live-verified. The app will not use it to claim a ZEC receipt or shielded balance.");
+      setNotice(caps.canGenerateTransparentReceiver
+        ? `Zingolib ${caps.zingoVersion} is detected. Receiver and status commands are enabled for testing; wallet behavior is not live-verified, and shielding remains unavailable.`
+        : "Local companion is reachable, but the installed wallet CLI is not the supported version. Use a Zingo PC receiver instead; no ZEC receipt or shielding is claimed.");
     });
   }
 
   async function handleAgentPath(chain: ChainKey) {
     await runAction(`agent-path-${chain}`, async () => {
-      if (agentCapabilities?.verification !== "verified" || !agentCapabilities.canGenerateTransparentReceiver) {
+      if (!agentCapabilities?.canGenerateTransparentReceiver) {
         throw new Error("The configured wallet layer is not verified for automatic receiver generation. Enter a public receiver generated in Zingo PC instead.");
       }
       const path = await createAgentPath(agentToken.trim(), chain);
@@ -525,8 +525,8 @@ function App() {
               <button type="button" className="button button-secondary button-wide" onClick={() => void handleAgentConnect()} disabled={Boolean(busyAction) || !agentToken.trim()}>{busyAction === "agent" ? "Checking capabilities…" : "Check wallet capabilities"}</button>
               <label className="agent-sync-consent"><input type="checkbox" checked={allowRemoteLightwalletd} onChange={(event) => setAllowRemoteLightwalletd(event.target.checked)} /><span>Allow wallet status checks to contact the configured remote lightwalletd. It may observe this device’s IP and wallet scan queries; Zcash keys stay local. This choice lasts only for this tab.</span></label>
             </>}
-            {agentCapabilities && <div className={`capability-note ${agentCapabilities.verification === "verified" ? "verified" : "blocked"}`}><strong>{agentCapabilities.verification === "verified" ? "Wallet layer verified" : "Not live-verified"}</strong><p>{agentCapabilities.limitations[0] ?? "Shield preparation, signing, and broadcast are disabled."}</p></div>}
-            {agentCapabilities?.verification === "verified" && <div className="agent-tools">{chainKeys.map((chain) => <button type="button" className="agent-path-button" key={chain} disabled={Boolean(busyAction) || !agentCapabilities.canGenerateTransparentReceiver} onClick={() => void handleAgentPath(chain)}>{agentPaths[chain] ? `${chainMetadata[chain].name} path ready` : `Create ${chainMetadata[chain].name} receiver`}</button>)}</div>}
+            {agentCapabilities && <div className={`capability-note ${agentCapabilities.canGenerateTransparentReceiver ? "source-reviewed" : "blocked"}`}><strong>{agentCapabilities.canGenerateTransparentReceiver ? `CLI ${agentCapabilities.zingoVersion} detected` : "Not live-verified"}</strong><p>{agentCapabilities.limitations[0] ?? "Shield preparation, signing, and broadcast are disabled."}</p></div>}
+            {agentCapabilities?.canGenerateTransparentReceiver && <div className="agent-tools">{chainKeys.map((chain) => <button type="button" className="agent-path-button" key={chain} disabled={Boolean(busyAction)} onClick={() => void handleAgentPath(chain)}>{agentPaths[chain] ? `${chainMetadata[chain].name} path ready` : `Create ${chainMetadata[chain].name} receiver`}</button>)}</div>}
             <p className="agent-footnote">The token stays in this tab's memory. It is sent only to the fixed loopback agent, never to the hosted API.</p>
           </section>
 

@@ -4,7 +4,7 @@ The local companion is a separate loopback-only service. It is not the hosted AP
 
 ## Run
 
-Configure `ZINGO_CLI_PATH` and `ZINGO_DATA_DIR` in the local ignored `.env` only after identifying an existing Mainnet Zingo wallet. The directory must already contain a non-empty `zingo-wallet.dat`; the agent refuses to initialize a new wallet. Close Zingo PC before using the same wallet directory because the CLI and desktop app must not write the wallet concurrently.
+Configure `ZINGO_CLI_PATH` and `ZINGO_DATA_DIR` in the local ignored `.env` only after identifying an existing Mainnet Zingo wallet. The directory must already contain a non-empty `zingo-wallet.dat`; the agent refuses to initialize a new wallet. Close Zingo PC before using the same wallet directory because the CLI and desktop app must not write the wallet concurrently. Receiver and status commands fail closed unless the executable's `version` output is exactly `zingolib_v6.0.0`. The version gate is a source-derived compatibility check, not proof that wallet commands work with the user's local wallet.
 
 Start it with `npm run dev:agent`. It binds only to `127.0.0.1:4180`. The process prints a random local pairing token once. The web app should keep that token in memory only and send it as `Authorization: Bearer …`; do not send it to the hosted backend or persist it. Configure exact HTTPS origins in `ZECRESCUE_AGENT_WEB_ORIGINS` for a deployed frontend. Never use `*`.
 
@@ -18,7 +18,7 @@ Every request requires the local bearer token, an allowed `Origin` when supplied
 | --- | --- | --- |
 | `GET /healthz` | Mainnet agent liveness | Available |
 | `GET /v1/capabilities` | Wallet file and operation capability flags | Available; reports `source_review_only`, not live proof |
-| `POST /v1/receive-paths` `{ "sourceChain": "base" \| "arbitrum" }` | Generate a unique transparent receiver through Zingolib CLI; return its one-time `pathId` | Available when explicitly configured with an existing wallet |
+| `POST /v1/receive-paths` `{ "sourceChain": "base" \| "arbitrum" }` | Generate a unique transparent receiver through Zingolib CLI; return its one-time `pathId` | Available only with the exact pinned CLI version and an existing wallet; still requires local runtime verification |
 | `POST /v1/receive-paths/:pathId/status` `{ "allowRemoteLightwalletd": true }` | Sync through configured remote lightwalletd, then inspect the exact locally generated receiver | Requires explicit browser-session consent; CLI response schema remains source-review-only |
 | `POST /v1/shielding/prepare` | Prepare a source-isolated Ironwood shield | Returns `501 IRONWOOD_SHIELDING_NOT_VERIFIED` |
 | `POST /v1/shielding/:preparationId/approve` `{}` | Local approval step | Disabled |

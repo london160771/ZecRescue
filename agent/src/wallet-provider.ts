@@ -9,6 +9,7 @@ import { AgentError } from "./errors.js";
 const execFile = promisify(execFileCallback);
 const walletFileName = "zingo-wallet.dat";
 const pathRegistryFileName = ".zecrescue-agent-paths.json";
+const supportedZingolibVersion = "zingolib_v6.0.0";
 const commandTimeoutMs = 120_000;
 const maxBufferBytes = 1024 * 1024;
 
@@ -18,6 +19,7 @@ export type AgentCapabilities = {
   network: "mainnet";
   walletLayer: "not_configured" | "zingo_cli";
   walletFilePresent: boolean;
+  zingoVersion: string | null;
   verification: "not_configured" | "source_review_only";
   canGenerateTransparentReceiver: boolean;
   canMonitorReceiver: boolean;
@@ -61,6 +63,7 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
   private operationTail: Promise<void> = Promise.resolve();
   private resolvedWalletPromise?: Promise<ConfiguredWallet>;
   private pathRegistryPromise?: Promise<void>;
+  private cliVersionPromise?: Promise<string>;
 
   constructor(
     private readonly configuredCliPath?: string,
@@ -74,6 +77,7 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
         network: "mainnet",
         walletLayer: "not_configured",
         walletFilePresent: false,
+        zingoVersion: null,
         verification: "not_configured",
         canGenerateTransparentReceiver: false,
         canMonitorReceiver: false,
@@ -89,21 +93,26 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
     try {
       const wallet = await this.getConfiguredWallet();
       await this.loadPathRegistry(wallet.dataDir);
+      const zingoVersion = await this.getZingoVersion(wallet);
+      const supported = zingoVersion === supportedZingolibVersion;
       return {
         network: "mainnet",
         walletLayer: "zingo_cli",
         walletFilePresent: true,
+        zingoVersion,
         verification: "source_review_only",
-        canGenerateTransparentReceiver: true,
-        canMonitorReceiver: true,
+        canGenerateTransparentReceiver: supported,
+        canMonitorReceiver: supported,
         canGenerateIronwoodReceiver: false,
         canPrepareShielding: false,
         canSignLocally: false,
         canBroadcast: false,
         canPrepareWithdrawal: false,
         limitations: [
-          "Wallet sync/status output has not yet been verified against the installed Zingolib build.",
-          "Zingolib v6 documents Ironwood shielding, but the installed build and account-level transparent input selection do not prove per-source isolation; shield, sign, and broadcast are disabled."
+          supported
+            ? "Zingolib v6.0.0 is detected; receiver generation is enabled, but live sync/status behavior has not been proven against this wallet."
+            : `Only ${supportedZingolibVersion} is enabled for receiver commands; installed version ${zingoVersion || "unknown"} is unsupported.`,
+          "Ironwood shield, local signing, and broadcast remain disabled until the account-level input set is proven to contain only the active source receiver."
         ]
       };
     } catch {
@@ -111,6 +120,7 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
         network: "mainnet",
         walletLayer: "zingo_cli",
         walletFilePresent: false,
+        zingoVersion: null,
         verification: "source_review_only",
         canGenerateTransparentReceiver: false,
         canMonitorReceiver: false,
@@ -127,6 +137,7 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
   async createReceivePath(sourceChain: SourceChain): Promise<ReceivePath> {
     return this.serialized(async () => {
       const wallet = await this.getConfiguredWallet();
+      await this.requireSupportedVersion(wallet);
       const output = await this.invoke(wallet, ["new_taddress"]);
       const address = requireStringField(output, "encoded_address");
       if (!isMainnetTransparentP2pkhAddress(address)) {
@@ -158,6 +169,7 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
     if (allowRemoteLightwalletd !== true) throw new AgentError(400, "LIGHTWALLETD_CONSENT_REQUIRED");
     return this.serialized(async () => {
       const wallet = await this.getConfiguredWallet();
+      await this.requireSupportedVersion(wallet);
       await this.loadPathRegistry(wallet.dataDir);
       const path = this.paths.get(pathId);
       if (!path) throw new AgentError(404, "RECEIVE_PATH_NOT_FOUND");
@@ -177,6 +189,25 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
     if (!this.configuredCliPath || !this.configuredDataDir) throw new AgentError(503, "WALLET_NOT_CONFIGURED");
     this.resolvedWalletPromise ??= this.resolveConfiguredWallet();
     return this.resolvedWalletPromise;
+  }
+
+  private async getZingoVersion(wallet: ConfiguredWallet): Promise<string | null> {
+    try {
+      this.cliVersionPromise ??= this.invokeText(wallet, ["version"]);
+      const output = await this.cliVersionPromise;
+      if (!output || output.length > 128 || [...output].some((character) => {
+        const code = character.charCodeAt(0);
+        return code < 32 || code === 127;
+      })) return null;
+      return output;
+    } catch {
+      return null;
+    }
+  }
+
+  private async requireSupportedVersion(wallet: ConfiguredWallet): Promise<void> {
+    const version = await this.getZingoVersion(wallet);
+    if (version !== supportedZingolibVersion) throw new AgentError(503, "ZINGO_VERSION_UNSUPPORTED");
   }
 
   private async resolveConfiguredWallet(): Promise<ConfiguredWallet> {
@@ -242,6 +273,10 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
   }
 
   private async invoke(wallet: ConfiguredWallet, command: string[]): Promise<Record<string, unknown>> {
+    return parseCommandJson(await this.invokeText(wallet, command));
+  }
+
+  private async invokeText(wallet: ConfiguredWallet, command: string[]): Promise<string> {
     try {
       const { stdout } = await this.runCommand(
         wallet.cliPath,
@@ -254,7 +289,7 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
           env: safeChildEnvironment(process.env)
         }
       );
-      return parseCommandJson(String(stdout));
+      return String(stdout).trim();
     } catch {
       throw new AgentError(503, "ZINGO_COMMAND_FAILED");
     }

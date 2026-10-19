@@ -445,6 +445,8 @@ input[aria-invalid="true"] { border-color: #cc7669; }
 
 .capability-note.blocked { color: #765821; background: #fff5dc; }
 
+.capability-note.source-reviewed { color: #645735; border: 1px solid #e9dfc3; background: #fffaf0; }
+
 .capability-note.verified { color: #356447; background: #edf7ee; }
 
 .capability-note strong { display: block; font-size: 9px; }

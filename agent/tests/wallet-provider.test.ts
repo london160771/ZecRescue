@@ -66,26 +66,67 @@ describe("ZingoCliWalletProvider", () => {
 
   it("uses only a fixed mainnet CLI command and rejects non-address output", async () => {
     const { cliPath, dataDir } = await existingWalletFixture();
-    const runner = vi.fn(async (_file: string, _args: readonly string[]) => {
+    const runner = vi.fn(async (_file: string, args: readonly string[]) => {
       void _file;
-      void _args;
-      return { stdout: JSON.stringify({ encoded_address: "not-a-zcash-address" }), stderr: "" };
+      return { stdout: args.at(-1) === "version" ? "zingolib_v6.0.0" : JSON.stringify({ encoded_address: "not-a-zcash-address" }), stderr: "" };
     });
     const provider = new ZingoCliWalletProvider(cliPath, dataDir, runner as never);
     await expect(provider.createReceivePath("base")).rejects.toMatchObject({ code: "WALLET_RETURNED_INVALID_MAINNET_RECEIVER" });
-    expect(runner).toHaveBeenCalledWith(
+    expect(runner).toHaveBeenNthCalledWith(1,
+      cliPath,
+      ["--chain", "mainnet", "--data-dir", dataDir, "version"],
+      expect.objectContaining({ windowsHide: true, timeout: 120_000 })
+    );
+    expect(runner).toHaveBeenNthCalledWith(2,
       cliPath,
       ["--chain", "mainnet", "--data-dir", dataDir, "new_taddress"],
       expect.objectContaining({ windowsHide: true, timeout: 120_000 })
     );
   });
 
+  it("enables only source-reviewed receiver operations for the pinned CLI release", async () => {
+    const { cliPath, dataDir } = await existingWalletFixture();
+    const runner = vi.fn(async (_file: string, args: readonly string[]) => ({
+      stdout: args.at(-1) === "version" ? "zingolib_v6.0.0" : "{}",
+      stderr: ""
+    }));
+    const provider = new ZingoCliWalletProvider(cliPath, dataDir, runner as never);
+    expect(await provider.getCapabilities()).toMatchObject({
+      walletLayer: "zingo_cli",
+      zingoVersion: "zingolib_v6.0.0",
+      verification: "source_review_only",
+      canGenerateTransparentReceiver: true,
+      canMonitorReceiver: true,
+      canPrepareShielding: false,
+      canSignLocally: false,
+      canBroadcast: false
+    });
+  });
+
+  it("fails closed for unsupported or unknown Zingolib builds", async () => {
+    const { cliPath, dataDir } = await existingWalletFixture();
+    const runner = vi.fn(async () => ({ stdout: "zingolib_v5.0.0", stderr: "" }));
+    const provider = new ZingoCliWalletProvider(cliPath, dataDir, runner as never);
+    expect(await provider.getCapabilities()).toMatchObject({
+      zingoVersion: "zingolib_v5.0.0",
+      canGenerateTransparentReceiver: false,
+      canMonitorReceiver: false,
+      canPrepareShielding: false,
+      canSignLocally: false,
+      canBroadcast: false
+    });
+    await expect(provider.createReceivePath("base")).rejects.toMatchObject({ code: "ZINGO_VERSION_UNSUPPORTED" });
+    expect(runner).toHaveBeenCalledTimes(1);
+  });
+
   it("does not return a detected balance when the CLI response schema is unknown", async () => {
     const { cliPath, dataDir } = await existingWalletFixture();
     const runner = vi.fn(async (_file: string, args: readonly string[]) => ({
-      stdout: args.at(-1) === "new_taddress"
-        ? JSON.stringify({ encoded_address: validT1 })
-        : JSON.stringify({ unexpected: [] }),
+      stdout: args.at(-1) === "version"
+        ? "zingolib_v6.0.0"
+        : args.at(-1) === "new_taddress"
+          ? JSON.stringify({ encoded_address: validT1 })
+          : JSON.stringify({ unexpected: [] }),
       stderr: ""
     }));
     const provider = new ZingoCliWalletProvider(cliPath, dataDir, runner as never);
@@ -97,7 +138,7 @@ describe("ZingoCliWalletProvider", () => {
     const { cliPath, dataDir } = await existingWalletFixture();
     const creatorRunner = vi.fn(async (_file: string, args: readonly string[]) => {
       void _file;
-      return { stdout: args.at(-1) === "new_taddress" ? JSON.stringify({ encoded_address: validT1 }) : "{}", stderr: "" };
+      return { stdout: args.at(-1) === "version" ? "zingolib_v6.0.0" : args.at(-1) === "new_taddress" ? JSON.stringify({ encoded_address: validT1 }) : "{}", stderr: "" };
     });
     const creator = new ZingoCliWalletProvider(cliPath, dataDir, creatorRunner as never);
     const path = await creator.createReceivePath("base");
@@ -105,9 +146,11 @@ describe("ZingoCliWalletProvider", () => {
     const monitorRunner = vi.fn(async (_file: string, args: readonly string[]) => {
       void _file;
       return {
-        stdout: args.at(-1) === "coins"
-          ? JSON.stringify({ transparent_coins: [{ address: validT1, value: "42" }] })
-          : "{}",
+        stdout: args.at(-1) === "version"
+          ? "zingolib_v6.0.0"
+          : args.at(-1) === "coins"
+            ? JSON.stringify({ transparent_coins: [{ address: validT1, value: "42" }] })
+            : "{}",
         stderr: ""
       };
     });

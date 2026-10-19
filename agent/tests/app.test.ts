@@ -11,6 +11,7 @@ class TestWalletProvider implements ZcashWalletProvider {
       network: "mainnet",
       walletLayer: "not_configured",
       walletFilePresent: false,
+      zingoVersion: null,
       verification: "not_configured",
       canGenerateTransparentReceiver: false,
       canMonitorReceiver: false,
