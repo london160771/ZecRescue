@@ -43,7 +43,7 @@
 - **Privacy/security:** Replaced the user's previously shared public `t1` address in an existing tracked test and new tests with synthetic checksummed test addresses. Agent never reads/displays recovery words and sends no wallet material to the hosted API. The user must close Zingo PC before configuring the agent against the same data directory to avoid concurrent wallet writes.
 - **Verification:** `npm test` — 32 passed; `npm run typecheck` — passed; `npm run lint` — passed; `npm run build:api` — passed; `npm run build:agent` — passed; `git diff --check` — passed. Tests use synthetic CLI output; these are not live Zcash proof. No Zingo CLI was configured and no wallet file was opened.
 - **Major review checkpoint:** Adversarial review covered localhost/DNS-rebinding boundary, origin and token checks, process argument injection, child environment inheritance, empty wallet auto-creation, address/path persistence, output parsing, concurrent CLI invocations, the Zingolib shield input scope, Ironwood terminology, and accidental inclusion of the public receiver. The current scope prevents key import, arbitrary command execution, wallet auto-creation, and unverified shielding/broadcast. No unresolved code-severity finding remains; the specific third-party behavior gaps are recorded as blockers.
-- **Implementation commit:** Pending.
+- **Implementation commit:** `070e75d` (`feat: add local Zcash rescue agent boundary`).
 - **Unresolved:** Live CLI compatibility, coin-summary schema and sync evidence, and a verified source-isolated Ironwood shield + user approval/sign/broadcast flow. No funds moved.
 
 ## Phases 4–6
