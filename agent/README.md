@@ -29,6 +29,6 @@ The `pathId` to chain/address association is stored in `.zecrescue-agent-paths.j
 
 ## Current Zingolib limitation
 
-The CLI supports `new_taddress` and `coins`, but its current shielding implementation uses the wallet account's eligible transparent funds and the library source hardcodes the Orchard selector in the shielding change strategy. The command help calls this Ironwood shielding, which conflicts with that implementation detail and with ZecRescue's per-source isolation rule. Until the installed version proves a safe, per-receiver Ironwood transaction and a local approval/broadcast sequence, every signing, shielding, withdrawal, and broadcast capability remains disabled. The agent never calls the CLI's `quickshield` command.
+The official Zingolib v6.0.0 source documents a `shield` command that prepares a transparent-to-Ironwood proposal and a separate `confirm` command that transmits it. `quickshield` fuses those operations and transmits immediately; the agent must never call it. The CLI selects eligible transparent outputs at account scope rather than selecting one receiver, and the installed binary and wallet compatibility are not verified. Until the agent can prove the proposal includes only the active chain's receiver and can present exact amount/fee for local approval, shielding/signing/broadcast stays disabled.
 
 No live Zcash transaction was performed as part of this implementation. Unit tests use synthetic CLI outputs and do not establish that Zingolib is installed, synced, or compatible with the user's wallet data.

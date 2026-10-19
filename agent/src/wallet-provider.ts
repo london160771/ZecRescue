@@ -103,7 +103,7 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
         canPrepareWithdrawal: false,
         limitations: [
           "Wallet sync/status output has not yet been verified against the installed Zingolib build.",
-          "The current CLI shielding path does not prove per-source receiver isolation or the required Ironwood destination; shield, sign, and broadcast are disabled."
+          "Zingolib v6 documents Ironwood shielding, but the installed build and account-level transparent input selection do not prove per-source isolation; shield, sign, and broadcast are disabled."
         ]
       };
     } catch {
