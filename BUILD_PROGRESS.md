@@ -55,7 +55,7 @@
 - **Privacy/security:** Strict workflow creation schema rejects Recovery Vault mapping fields. Mongo keeps only the existing operational EVM/quote state; the local public receiver-to-chain manifest is never uploaded. ZEC receipt and shield status remain `not_verified_by_orchestrator` / `disabled_pending_wallet_verification` until the local wallet proof exists.
 - **Verification:** `npm test` — 38 passed (12 files); `npm run typecheck` — passed; `npm run lint` — passed; `npm run build:api` — passed; `npm run build:agent` — passed; `git diff --check` — passed.
 - **Major review checkpoint:** Adversarial review confirmed Base/Arbitrum legs refresh independently, partial outcomes remain visible, quote refresh stays explicit per leg, there is no blanket retry/rebroadcast, and local receiver metadata is never stored in Mongo. Uncertain/failed transfers require manual reconciliation. The local manifest contains only public receiver paths and chain labels; shield/broadcast remain disabled. Strict workflow request schema rejects identity/key fields. No blocking code finding remains; external integration blockers remain listed.
-- **Implementation commit:** Pending.
+- **Implementation commit:** `8789c79` (`feat: orchestrate Base and Arbitrum rescue workflows`).
 - **Unresolved:** Live RPC/provider calls, user wallet connection, and Phase 0 funded final validation remain outside this code-only phase.
 
 ## Phases 5–6
