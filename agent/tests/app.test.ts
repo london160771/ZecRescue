@@ -2,6 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadAgentConfig } from "../src/config.js";
+import { AgentError } from "../src/errors.js";
 import { createAgentApp } from "../src/http/app.js";
 import type { AgentCapabilities, ReceivePath, ReceiveStatus, SourceChain, ZcashWalletProvider } from "../src/wallet-provider.js";
 
@@ -24,11 +25,15 @@ class TestWalletProvider implements ZcashWalletProvider {
     };
   }
   async createReceivePath(sourceChain: SourceChain): Promise<ReceivePath> {
-    return { pathId: "839138ae-3d5b-4e8f-b811-8f66f2fb3191", sourceChain, address: "test-only", receiverType: "transparent_p2pkh", generatedAt: new Date(0).toISOString() };
+    return { pathId: "839138ae-3d5b-4e8f-b811-8f66f2fb3191", sourceChain, address: "test-only", accountId: 0, receiverType: "transparent_p2pkh", generatedAt: new Date(0).toISOString() };
   }
   async getReceiveStatus(pathId: string, allowRemoteLightwalletd: true): Promise<ReceiveStatus> {
     if (allowRemoteLightwalletd !== true) throw new Error("explicit sync consent required");
     return { pathId, state: "not_detected", amountZatoshis: "0", syncedAt: new Date(0).toISOString(), confirmations: "not_reported_by_adapter" };
+  }
+  async prepareShielding(pathId: string): Promise<never> {
+    void pathId;
+    throw new AgentError(501, "SOURCE_SCOPED_SHIELD_BRIDGE_REQUIRED");
   }
 }
 
@@ -68,9 +73,15 @@ describe("local agent HTTP safety boundary", () => {
     const headers = { origin: "http://localhost:5173", authorization: `Bearer ${token}`, "content-type": "application/json" };
     const invalidChain = await fetch(`${origin}/v1/receive-paths`, { method: "POST", headers, body: JSON.stringify({ sourceChain: "optimism" }) });
     expect(invalidChain.status).toBe(400);
-    const prepare = await fetch(`${origin}/v1/shielding/prepare`, { method: "POST", headers, body: "{}" });
+    const prepare = await fetch(`${origin}/v1/shielding/prepare`, {
+      method: "POST", headers, body: JSON.stringify({ pathId: "839138ae-3d5b-4e8f-b811-8f66f2fb3191" })
+    });
     expect(prepare.status).toBe(501);
-    expect(await prepare.json()).toEqual({ error: "IRONWOOD_SHIELDING_NOT_VERIFIED" });
+    expect(await prepare.json()).toEqual({ error: "SOURCE_SCOPED_SHIELD_BRIDGE_REQUIRED" });
+    const arbitraryAddress = await fetch(`${origin}/v1/shielding/prepare`, {
+      method: "POST", headers, body: JSON.stringify({ pathId: "839138ae-3d5b-4e8f-b811-8f66f2fb3191", address: "t1attacker" })
+    });
+    expect(arbitraryAddress.status).toBe(400);
   });
 
   it("requires explicit consent before a status request can sync through remote lightwalletd", async () => {

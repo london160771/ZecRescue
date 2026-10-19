@@ -9,6 +9,7 @@ import type { ZcashWalletProvider } from "../wallet-provider.js";
 
 const receiveSchema = z.object({ sourceChain: z.enum(["base", "arbitrum"]) }).strict();
 const syncSchema = z.object({ allowRemoteLightwalletd: z.literal(true) }).strict();
+const shieldSchema = z.object({ pathId: z.string().uuid() }).strict();
 const emptySchema = z.object({}).strict();
 
 function localRequestGuard(config: AgentConfig): RequestHandler {
@@ -81,9 +82,16 @@ export function createAgentApp(config: AgentConfig, provider: ZcashWalletProvide
     response.json(await provider.getReceiveStatus(pathId, body.allowRemoteLightwalletd));
   });
 
-  // These paths are intentionally present in the API contract but disabled until
-  // the wallet layer proves destination-pool and per-source input isolation.
-  app.post("/v1/shielding/prepare", (_request, _response, next) => next(new AgentError(501, "IRONWOOD_SHIELDING_NOT_VERIFIED")));
+  // The caller may name only a locally registered path, never an arbitrary
+  // receiver. The standard CLI cannot consume its exact-address selector yet.
+  app.post("/v1/shielding/prepare", async (request, _response, next) => {
+    try {
+      const body = parseBody(shieldSchema, request.body);
+      await provider.prepareShielding(body.pathId);
+    } catch (error) {
+      next(error);
+    }
+  });
   app.post("/v1/shielding/:preparationId/approve", (request, _response, next) => {
     parseBody(emptySchema, request.body);
     if (!z.string().uuid().safeParse(request.params.preparationId).success) return next(new AgentError(400, "INVALID_REQUEST"));

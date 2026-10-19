@@ -35,6 +35,7 @@ export type ReceivePath = {
   pathId: string;
   sourceChain: SourceChain;
   address: string;
+  accountId: 0;
   receiverType: "transparent_p2pkh";
   generatedAt: string;
 };
@@ -51,6 +52,7 @@ export interface ZcashWalletProvider {
   getCapabilities(): Promise<AgentCapabilities>;
   createReceivePath(sourceChain: SourceChain): Promise<ReceivePath>;
   getReceiveStatus(pathId: string, allowRemoteLightwalletd: true): Promise<ReceiveStatus>;
+  prepareShielding(pathId: string): Promise<never>;
 }
 
 type ConfiguredWallet = {
@@ -112,7 +114,7 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
           supported
             ? "Zingolib v6.0.0 is detected; receiver generation is enabled, but live sync/status behavior has not been proven against this wallet."
             : `Only ${supportedZingolibVersion} is enabled for receiver commands; installed version ${zingoVersion || "unknown"} is unsupported.`,
-          "Ironwood shield, local signing, and broadcast remain disabled until the account-level input set is proven to contain only the active source receiver."
+          "The standard shield command passes every transparent receiver to input selection. Shielding requires a source-scoped proposal using only the selected path address and an exact input-address audit; the released CLI does not expose that selector, so shielding, signing, and broadcast remain disabled."
         ]
       };
     } catch {
@@ -140,6 +142,7 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
       await this.requireSupportedVersion(wallet);
       const output = await this.invoke(wallet, ["new_taddress"]);
       const address = requireStringField(output, "encoded_address");
+      if (requireAccountId(output) !== 0) throw new AgentError(503, "WALLET_RETURNED_UNEXPECTED_ACCOUNT");
       if (!isMainnetTransparentP2pkhAddress(address)) {
         throw new AgentError(503, "WALLET_RETURNED_INVALID_MAINNET_RECEIVER");
       }
@@ -151,6 +154,7 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
         pathId: randomUUID(),
         sourceChain,
         address,
+        accountId: 0,
         receiverType: "transparent_p2pkh",
         generatedAt: new Date().toISOString()
       };
@@ -182,6 +186,22 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
         syncedAt: new Date().toISOString(),
         confirmations: "not_reported_by_adapter"
       };
+    });
+  }
+
+  async prepareShielding(pathId: string): Promise<never> {
+    return this.serialized(async () => {
+      const wallet = await this.getConfiguredWallet();
+      await this.requireSupportedVersion(wallet);
+      await this.loadPathRegistry(wallet.dataDir);
+      const path = this.paths.get(pathId);
+      if (!path) throw new AgentError(404, "RECEIVE_PATH_NOT_FOUND");
+
+      // Build the only selector a source-scoped bridge may receive. The regular
+      // CLI cannot consume this allowlist, so fail closed before preparing a
+      // proposal, signing, or broadcasting anything.
+      sourceScopedShieldRequest(path);
+      throw new AgentError(501, "SOURCE_SCOPED_SHIELD_BRIDGE_REQUIRED");
     });
   }
 
@@ -314,8 +334,74 @@ function isReceivePath(value: unknown): value is ReceivePath {
   return typeof item.pathId === "string" && /^[0-9a-f-]{36}$/i.test(item.pathId) &&
     (item.sourceChain === "base" || item.sourceChain === "arbitrum") &&
     typeof item.address === "string" && isMainnetTransparentP2pkhAddress(item.address) &&
+    item.accountId === 0 &&
     item.receiverType === "transparent_p2pkh" && typeof item.generatedAt === "string" &&
     Number.isFinite(Date.parse(item.generatedAt));
+}
+
+function requireAccountId(object: Record<string, unknown>): number {
+  const value = object.account;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new AgentError(503, "ZINGO_RESPONSE_UNSUPPORTED");
+  }
+  return value;
+}
+
+export type SourceScopedShieldRequest = {
+  pathId: string;
+  sourceChain: SourceChain;
+  sourceAccountId: 0;
+  fromAddresses: readonly [string];
+  destinationAccountId: 0;
+  requiredOutputPoolForEvidence: "ironwood";
+};
+
+export type ShieldProposalEvidence = {
+  pathId: string;
+  sourceChain: SourceChain;
+  sourceAccountId: number;
+  destinationAccountId: number;
+  sourceAddress: string;
+  shieldedPool: string;
+  selectedInputAddresses: string[];
+};
+
+export function sourceScopedShieldRequest(path: ReceivePath): SourceScopedShieldRequest {
+  if (
+    !/^[0-9a-f-]{36}$/i.test(path.pathId) ||
+    (path.sourceChain !== "base" && path.sourceChain !== "arbitrum") ||
+    path.accountId !== 0 ||
+    !isMainnetTransparentP2pkhAddress(path.address)
+  ) {
+    throw new AgentError(409, "SHIELD_SOURCE_PATH_INVALID");
+  }
+  return {
+    pathId: path.pathId,
+    sourceChain: path.sourceChain,
+    sourceAccountId: 0,
+    fromAddresses: [path.address],
+    destinationAccountId: 0,
+    requiredOutputPoolForEvidence: "ironwood"
+  };
+}
+
+export function assertShieldProposalIsSourceScoped(
+  request: SourceScopedShieldRequest,
+  evidence: ShieldProposalEvidence
+): void {
+  if (
+    evidence.pathId !== request.pathId ||
+    evidence.sourceChain !== request.sourceChain ||
+    evidence.sourceAccountId !== request.sourceAccountId ||
+    evidence.destinationAccountId !== request.destinationAccountId ||
+    evidence.sourceAddress !== request.fromAddresses[0] ||
+    evidence.shieldedPool !== request.requiredOutputPoolForEvidence ||
+    !Array.isArray(evidence.selectedInputAddresses) ||
+    evidence.selectedInputAddresses.length === 0 ||
+    evidence.selectedInputAddresses.some((address) => typeof address !== "string" || address !== request.fromAddresses[0])
+  ) {
+    throw new AgentError(409, "SHIELD_PROPOSAL_SOURCE_MISMATCH");
+  }
 }
 
 function safeChildEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
