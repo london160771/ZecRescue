@@ -14,12 +14,13 @@
 
 ## Phase 1 — Core Rescue Engine
 
-**Status:** Implemented and verified; phase commit prepared.
+**Status:** Implemented, verified, and committed.
 
 - **Implementation:** Added the typed Base/Arbitrum chain registry and server-only RPC configuration, native USDC scanning, EIP-3009 typed payload generation (random nonce, 300-second validity), signature recovery and binding checks, exact-call simulation, separate relayer submission, atomic job-leg transitions, idempotent creation/submission, uncertain-broadcast reconciliation, MongoDB schemas, strict HTTP validation, CORS allowlisting, rate limiting, security headers, API timeouts, safe error responses, and API/build setup documentation.
 - **Privacy/security:** The victim never submits a private key. Signature bytes are not persisted. The database schema has no Zcash fields. Relayer/victim/destination/refund addresses must be distinct. A network timeout after submission becomes `needs_review`; the service never blindly rebroadcasts.
 - **Verification:** `npm test` — 15 passed; `npm run typecheck` — passed; `npm run lint` — passed; `npm run build:api` — passed; `git diff --check` — passed; `npm audit --offline` — 0 reported vulnerabilities. `.env` is still ignored.
 - **Major review checkpoint:** Reviewed the API boundaries, EIP-712 domain and amount/destination binding, expiry/nonce checks, relayer separation, state transitions, idempotency race handling, MongoDB field allowlist, and response serialization. Corrected BigInt JSON serialization before accepting the phase. No real chain write or real wallet signature was performed.
+- **Commit:** `6010348` (`feat: implement Phase 1 rescue engine`).
 - **Unresolved:** No `MONGODB_URI` or relayer key was provided, so live MongoDB startup and an on-chain transaction were not attempted. The required funded Base/Arbitrum conversion and Zcash tests remain pending by decision.
 
 Implementation and verification results will be recorded here before the Phase 1 commit and before work advances to Phase 2.
