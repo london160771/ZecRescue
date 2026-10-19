@@ -50,7 +50,7 @@ function fixture(status: RescueJob["legs"][number]["status"] = "discovered"): Re
       chainKey: "base",
       chainId: 8453,
       tokenAddress: getAddress(baseUsdc),
-      balanceAtScanBaseUnits: "10000",
+      balanceAtScanBaseUnits: "2000000",
       status,
       updatedAt: now
     }]
@@ -81,12 +81,12 @@ function providerQuote(request: NearQuoteRequest, recipient = request.recipient)
     },
     quote: {
       amountIn: request.amount,
-      amountInFormatted: "0.01",
-      amountInUsd: "0.01",
-      minAmountIn: "9900",
+      amountInFormatted: "1.00",
+      amountInUsd: "1.00",
+      minAmountIn: "990000",
       amountOut: "12345",
       amountOutFormatted: "0.00012345",
-      amountOutUsd: "0.01",
+      amountOutUsd: "1.00",
       minAmountOut: "12000",
       depositAddress,
       depositMemo: "test-memo",
@@ -138,7 +138,7 @@ describe("NEAR quote-to-job binding", () => {
     const service = new RescueService(repository, gateway);
 
     const result = await service.createIntentQuote(job.jobId, "base", {
-      amountBaseUnits: "10000",
+      amountBaseUnits: "1000000",
       zcashRecipient: zecReceiver
     });
     const stored = await repository.get(job.jobId);
@@ -162,7 +162,7 @@ describe("NEAR quote-to-job binding", () => {
     const service = new RescueService(repository, gateway);
 
     await expect(service.createIntentQuote(job.jobId, "base", {
-      amountBaseUnits: "10000",
+      amountBaseUnits: "1000000",
       zcashRecipient: zecReceiver
     })).rejects.toMatchObject({ code: "PROVIDER_QUOTE_BINDING_MISMATCH" });
     expect((await repository.get(job.jobId))?.legs[0]?.status).toBe("discovered");

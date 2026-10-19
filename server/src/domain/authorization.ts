@@ -101,6 +101,13 @@ export function signatureParts(signature: Hex): { v: number; r: Hex; s: Hex } {
   const r = `0x${signature.slice(2, 66)}` as Hex;
   const s = `0x${signature.slice(66, 130)}` as Hex;
   const recovery = Number.parseInt(signature.slice(130, 132), 16);
+  const rValue = BigInt(r);
+  const sValue = BigInt(s);
+  const secp256k1Order = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+  const secp256k1HalfOrder = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0n;
+  if (rValue === 0n || rValue >= secp256k1Order || sValue === 0n || sValue > secp256k1HalfOrder) {
+    throw new Error("Signature has invalid or malleable ECDSA values");
+  }
   if (recovery !== 0 && recovery !== 1 && recovery !== 27 && recovery !== 28) {
     throw new Error("Signature recovery byte must be 0, 1, 27, or 28");
   }

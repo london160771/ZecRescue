@@ -55,16 +55,16 @@ Secrets are server-side configuration only. The service must degrade safely if R
 
 EIP-3009 binds token/source chain via its typed-data domain plus authorizer, exact amount, recipient, validity interval, and unique nonce. Validate all parameters server-side before broadcast, re-read nonce/balance/quote where practical, simulate exact calldata, then submit through the separate relayer. Handle attacker race and invalid/stale authorization without retrying a changed route under an old signature.
 
-Production gas reimbursement is not considered solved by direct authorization alone. Phase 5 must choose and implement a route where reimbursement is capped and the authorized destination cannot be redirected. If a minimal `RescueRouter` is required, it must:
+Direct authorization to the provider cannot atomically reimburse a relayer. The current code-level Phase 5 design adds a minimal `RescueRouter` that:
 
 - accept only exact user authorization and a route-bound typed consent;
 - invoke native USDC's supported `receiveWithAuthorization`;
-- pay only a configured/capped relayer reimbursement;
+- pay only the fixed reimbursement amount explicitly signed by the user and bounded by a configured cap;
 - forward the remainder to the exact quote deposit address;
 - reject replay, expiry, changed target, changed amount, and reentrancy;
 - have no privileged arbitrary sweep or redirect function.
 
-Do not deploy it during implementation without explicit approval. Any production contract receives a major adversarial review.
+The API pins the router's runtime code hash and fails closed if it differs. The contract has no privileged redirect, sweep, or arbitrary-call path. The reimbursement is **not** calculated on-chain from actual gas. The API estimates buffered native gas, adds Base OP Stack L1-data and operator-fee estimates with headroom, relies on the Arbitrum combined gas estimate, and records actual Base receipt cost only if the RPC provides its L1 fee field. Fixed USDC reimbursement calibration, independent contract audit, deployment, and per-chain runtime hash verification remain blockers. Contract tests use a local EVM and a test-only mock token. Do not deploy or enable production relaying without explicit approval.
 
 ## 6. NEAR Intents
 

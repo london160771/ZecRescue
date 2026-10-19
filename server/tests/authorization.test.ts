@@ -41,6 +41,11 @@ describe("EIP-3009 authorization preparation", () => {
     expect(restoreAuthorization(jsonAuthorization)).toEqual(prepared.message);
     expect(await recoverAuthorizationSigner(prepared, signature)).toBe(account.address);
     expect(signatureParts(signature).v).toBeGreaterThanOrEqual(27);
+    const secp256k1Order = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+    const signatureS = BigInt(`0x${signature.slice(66, 130)}`);
+    const recovery = Number.parseInt(signature.slice(130, 132), 16);
+    const malleableSignature = `0x${signature.slice(2, 66)}${(secp256k1Order - signatureS).toString(16).padStart(64, "0")}${(recovery === 27 ? 28 : recovery === 28 ? 27 : 1 - recovery).toString(16).padStart(2, "0")}` as `0x${string}`;
+    expect(() => signatureParts(malleableSignature)).toThrow("invalid or malleable");
 
     const differentAmount = { ...prepared.message, value: 10_001n };
     expect(authorizationMatches(prepared.message, differentAmount)).toBe(false);

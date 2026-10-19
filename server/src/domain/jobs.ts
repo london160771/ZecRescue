@@ -1,6 +1,7 @@
 import type { Address, Hex } from "viem";
 import type { ChainKey } from "../config/chains.js";
 import type { TransferAuthorization } from "./authorization.js";
+import type { StoredRescueRoute } from "./rescue-route.js";
 
 export type StoredTransferAuthorization = Omit<TransferAuthorization, "value" | "validAfter" | "validBefore"> & {
   value: string;
@@ -55,11 +56,13 @@ export type RescueLeg = {
   amountBaseUnits?: string;
   destination?: Address;
   authorization?: StoredTransferAuthorization;
+  rescueRoute?: StoredRescueRoute;
   intentQuote?: IntentQuoteSnapshot;
   providerStatus?: string;
   preparedAtBlock?: string;
   idempotencyKeyHash?: Hex;
   transactionHash?: Hex;
+  estimatedRelayGasCostWei?: string;
   receiptGasCostWei?: string;
   lastErrorCode?: string;
   updatedAt: Date;
@@ -76,17 +79,26 @@ export type RescueJob = {
   legs: RescueLeg[];
 };
 
-export type LegPatch = Partial<Omit<RescueLeg, "chainKey" | "chainId" | "tokenAddress" | "balanceAtScanBaseUnits" | "lastErrorCode" | "receiptGasCostWei" | "providerStatus">> & {
+export type LegPatch = Partial<Omit<RescueLeg,
+  "chainKey" | "chainId" | "tokenAddress" | "balanceAtScanBaseUnits" | "lastErrorCode" | "receiptGasCostWei" | "providerStatus" |
+  "authorization" | "rescueRoute" | "destination" | "amountBaseUnits" | "preparedAtBlock" | "estimatedRelayGasCostWei"
+>> & {
   lastErrorCode?: string | null;
   receiptGasCostWei?: string | null;
   providerStatus?: string | null;
+  authorization?: StoredTransferAuthorization | null;
+  rescueRoute?: StoredRescueRoute | null;
+  destination?: Address | null;
+  amountBaseUnits?: string | null;
+  preparedAtBlock?: string | null;
+  estimatedRelayGasCostWei?: string | null;
 };
 
 export const allowedLegTransitions: Record<LegStatus, readonly LegStatus[]> = {
   discovered: ["quoted", "failed"],
   quoted: ["awaiting_authorization", "quote_expired", "failed"],
   quote_expired: ["quoted", "failed"],
-  awaiting_authorization: ["submitting", "failed"],
+  awaiting_authorization: ["submitting", "quote_expired", "failed"],
   submitting: ["submitted", "needs_review", "failed"],
   submitted: ["source_confirmed", "needs_review", "failed"],
   source_confirmed: ["converting", "completed", "failed", "refunded"],

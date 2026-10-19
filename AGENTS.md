@@ -87,7 +87,9 @@ Combine independent Base and Arbitrum legs with partial-success, retries, quote-
 
 ### Phase 5 — Production hardening
 
-Implement validation, replay safety, relayer balance/abuse controls, rate limits, idempotency and bounded retries, quote/refund edge cases, minimum thresholds, gas accounting and reimbursement. Select the safest practical design based on the Phase 0 evidence. If a RescueRouter is needed, keep it minimal, route-bound, and independently reviewed; do not let a relayer/admin redirect assets.
+Implement validation, replay safety, relayer balance/abuse controls, shared rate limits, idempotency and bounded retries, quote/refund edge cases, minimum thresholds, gas accounting and reimbursement. The current code uses an unaudited, undeployed, minimal `RescueRouter`: the victim signs Circle EIP-3009 to that router plus a second route-consent signature binding the exact provider deposit, relayer, amount, fixed USDC reimbursement, validity window, and both nonces. The router atomically pays the signed reimbursement and forwards the exact remainder, with no owner, upgrade, sweep, or arbitrary-call path. The API pins runtime code hash, verifies token and TTL, and fails closed if router settings are absent or changed.
+
+The reimbursement is presently a **fixed user-signed USDC amount**, not an on-chain calculation of actual gas cost. The API includes Base OP Stack L1 data/operator fee estimates with headroom, uses the Arbitrum RPC's combined gas estimate, and records a Base receipt L1 fee when the RPC returns it. These safeguards bound the relayer's native ETH exposure but do not prove that a fixed USDC payment equals actual gas. Do not describe this as exact actual-gas reimbursement or enable production relaying until reimbursement policy, caps, chain-specific estimates, independent contract review, and deployment are approved. Unit tests use a test-only mock token in an in-memory EVM; they are not deployment or mainnet evidence.
 
 ### Phase 6 — UI and demo
 

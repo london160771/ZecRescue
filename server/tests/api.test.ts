@@ -59,4 +59,27 @@ describe("Phase 1 API boundary", () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "INVALID_REQUEST" });
   });
+
+  it("requires a reimbursement amount before authorization and both signatures before submit", async () => {
+    const origin = await startApi();
+    const jobId = "15b61dcf-9f0a-4e0a-84dd-60716bcf16ba";
+    const authorization = await fetch(`${origin}/api/v1/jobs/${jobId}/base/authorization`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    });
+    expect(authorization.status).toBe(400);
+    expect(await authorization.json()).toEqual({ error: "INVALID_REQUEST" });
+
+    const submit = await fetch(`${origin}/api/v1/jobs/${jobId}/base/submit`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        signature: `0x${"00".repeat(65)}`,
+        idempotencyKey: "submit-idempotency-key-0001"
+      })
+    });
+    expect(submit.status).toBe(400);
+    expect(await submit.json()).toEqual({ error: "INVALID_REQUEST" });
+  });
 });

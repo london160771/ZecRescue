@@ -8,11 +8,14 @@ import {
   type Address,
   type Hex
 } from "viem";
+import { estimateL1Fee, estimateOperatorFee } from "viem/op-stack";
 import { getRelayerForChain } from "../config/relayer.js";
 import {
   AUTHORIZATION_TTL_SECONDS,
   getPublicClient,
+  minimumRescueUsdcBaseUnits,
   RESCUE_CHAINS,
+  routerSettingsForChain,
   V1_CHAIN_KEYS,
   type ChainKey
 } from "../config/chains.js";
@@ -28,6 +31,15 @@ import {
   type TransferAuthorization
 } from "../domain/authorization.js";
 import {
+  recoverRescueRouteSigner,
+  rescueRouteDomain,
+  rescueRouteMatches,
+  rescueRouteTypes,
+  restoreRescueRoute,
+  storeRescueRoute,
+  type RescueRoute
+} from "../domain/rescue-route.js";
+import {
   canTransitionLeg,
   type IntentQuoteSnapshot,
   type LegStatus,
@@ -36,6 +48,7 @@ import {
 } from "../domain/jobs.js";
 import { summarizeWorkflow } from "../domain/workflow.js";
 import { nativeUsdcAbi } from "../evm/native-usdc-abi.js";
+import { rescueRouterAbi } from "../evm/rescue-router-abi.js";
 import { isMainnetTransparentP2pkhAddress } from "../domain/zcash-address.js";
 import type { RescueJobRepository } from "../repositories/rescue-job-repository.js";
 import { parseSourceAddress, scanChainBalance, scanNativeUsdc } from "./balance-scanner.js";
@@ -67,7 +80,7 @@ export type CreateJobInput = {
 
 export type CreateRecoveryWorkflowInput = Omit<CreateJobInput, "selectedChains">;
 
-export type PrepareAuthorizationInput = Record<string, never>;
+export type PrepareAuthorizationInput = { reimbursementAmountBaseUnits: string };
 
 export type CreateIntentQuoteInput = {
   amountBaseUnits: string;
@@ -76,6 +89,7 @@ export type CreateIntentQuoteInput = {
 
 export type SubmitAuthorizationInput = {
   signature: Hex;
+  routeSignature: Hex;
   idempotencyKey: string;
 };
 
@@ -135,6 +149,10 @@ export class RescueService {
     const amountBaseUnits = BigInt(input.amountBaseUnits);
     if (amountBaseUnits <= 0n || amountBaseUnits > BigInt(leg.balanceAtScanBaseUnits)) {
       throw new RescueServiceError(400, "AMOUNT_EXCEEDS_SCANNED_BALANCE");
+    }
+    const minimumAmount = minimumRescueUsdcBaseUnits();
+    if (amountBaseUnits < minimumAmount) {
+      throw new RescueServiceError(422, "BELOW_MINIMUM_RESCUE_AMOUNT", { minimumAmountBaseUnits: minimumAmount.toString() });
     }
     if (!isMainnetTransparentP2pkhAddress(input.zcashRecipient)) {
       throw new RescueServiceError(400, "TRANSPARENT_MAINNET_ZCASH_RECIPIENT_REQUIRED");
@@ -298,7 +316,7 @@ export class RescueService {
     return job;
   }
 
-  async prepareAuthorization(jobId: string, chainKey: ChainKey) {
+  async prepareAuthorization(jobId: string, chainKey: ChainKey, input: PrepareAuthorizationInput) {
     const job = await this.getJob(jobId);
     const leg = getLeg(job, chainKey);
     if (leg.status !== "quoted" || !leg.intentQuote) throw new RescueServiceError(409, "LEG_NOT_PREPARABLE");
@@ -309,21 +327,47 @@ export class RescueService {
       throw new RescueServiceError(409, "QUOTE_EXPIRED_REFRESH_REQUIRED");
     }
     if (!isAddress(quote.depositAddress, { strict: false })) throw new RescueServiceError(502, "INVALID_PROVIDER_DEPOSIT_ADDRESS");
+    if (!/^[0-9]{1,78}$/.test(input.reimbursementAmountBaseUnits)) {
+      throw new RescueServiceError(400, "INVALID_REIMBURSEMENT_AMOUNT");
+    }
+    const reimbursementAmountBaseUnits = BigInt(input.reimbursementAmountBaseUnits);
     const amountBaseUnits = BigInt(quote.requestedAmountBaseUnits);
-    if (amountBaseUnits <= 0n || amountBaseUnits > BigInt(leg.balanceAtScanBaseUnits)) {
+    const totalAuthorizedAmount = amountBaseUnits + reimbursementAmountBaseUnits;
+    if (amountBaseUnits <= 0n || reimbursementAmountBaseUnits <= 0n || totalAuthorizedAmount > BigInt(leg.balanceAtScanBaseUnits)) {
       throw new RescueServiceError(400, "AMOUNT_EXCEEDS_SCANNED_BALANCE");
     }
-    const destination = getAddress(quote.depositAddress);
-    if (destination.toLowerCase() === job.sourceAddress.toLowerCase() ||
-        destination.toLowerCase() === job.cleanRefundAddress.toLowerCase()) {
+    const depositAddress = getAddress(quote.depositAddress);
+    let routerSettings: ReturnType<typeof routerSettingsForChain>;
+    try {
+      routerSettings = routerSettingsForChain(chainKey);
+    } catch {
+      throw new RescueServiceError(503, "RESCUE_ROUTER_NOT_CONFIGURED");
+    }
+    if (reimbursementAmountBaseUnits > routerSettings.reimbursementCapBaseUnits) {
+      throw new RescueServiceError(400, "REIMBURSEMENT_EXCEEDS_CONFIGURED_CAP", {
+        maximumReimbursementBaseUnits: routerSettings.reimbursementCapBaseUnits.toString()
+      });
+    }
+    let relayer: ReturnType<typeof getRelayerForChain>["account"];
+    try {
+      ({ account: relayer } = getRelayerForChain(chainKey));
+    } catch {
+      throw new RescueServiceError(503, "RELAYER_NOT_CONFIGURED");
+    }
+    const routerAddress = routerSettings.address;
+    if ([job.sourceAddress, job.cleanRefundAddress, depositAddress].some((address) => address.toLowerCase() === routerAddress.toLowerCase()) ||
+        [job.sourceAddress, job.cleanRefundAddress, depositAddress, routerAddress].some((address) => address.toLowerCase() === relayer.address.toLowerCase())) {
       throw new RescueServiceError(400, "DESTINATION_MUST_BE_DISTINCT");
     }
 
     const config = RESCUE_CHAINS[chainKey];
     const client = getPublicClient(chainKey);
-    const [chainId, code, name, symbol, version, decimals, currentBalance, block] = await Promise.all([
+    const [chainId, code, routerCode, routerUsdc, routerTtl, name, symbol, version, decimals, currentBalance, block] = await Promise.all([
       client.getChainId(),
       client.getCode({ address: config.usdc }),
+      client.getCode({ address: routerAddress }),
+      client.readContract({ address: routerAddress, abi: rescueRouterAbi, functionName: "usdc" }),
+      client.readContract({ address: routerAddress, abi: rescueRouterAbi, functionName: "MAX_AUTHORIZATION_TTL" }),
       client.readContract({ address: config.usdc, abi: nativeUsdcAbi, functionName: "name" }),
       client.readContract({ address: config.usdc, abi: nativeUsdcAbi, functionName: "symbol" }),
       client.readContract({ address: config.usdc, abi: nativeUsdcAbi, functionName: "version" }),
@@ -331,36 +375,62 @@ export class RescueService {
       client.readContract({ address: config.usdc, abi: nativeUsdcAbi, functionName: "balanceOf", args: [job.sourceAddress] }),
       client.getBlock({ blockTag: "latest" })
     ]);
-    if (chainId !== config.chain.id || !code || code === "0x") throw new RescueServiceError(502, "CHAIN_OR_TOKEN_VALIDATION_FAILED");
+    if (chainId !== config.chain.id || !code || code === "0x" || !routerCode || routerCode === "0x" ||
+        routerUsdc.toLowerCase() !== config.usdc.toLowerCase() || routerTtl !== AUTHORIZATION_TTL_SECONDS ||
+        keccak256(routerCode).toLowerCase() !== routerSettings.codeHash.toLowerCase()) {
+      throw new RescueServiceError(502, "CHAIN_TOKEN_OR_ROUTER_VALIDATION_FAILED");
+    }
     if (name !== "USD Coin" || symbol !== "USDC" || version !== "2" || decimals !== 6) {
       throw new RescueServiceError(502, "NATIVE_USDC_METADATA_MISMATCH");
     }
-    if (currentBalance < amountBaseUnits) throw new RescueServiceError(409, "CURRENT_BALANCE_TOO_LOW");
+    if (currentBalance < totalAuthorizedAmount) throw new RescueServiceError(409, "CURRENT_BALANCE_TOO_LOW");
 
     const nonce = `0x${cryptoRandomHex32()}` as Hex;
-    const nonceUsed = await client.readContract({
-      address: config.usdc,
-      abi: nativeUsdcAbi,
-      functionName: "authorizationState",
-      args: [job.sourceAddress, nonce]
-    });
-    if (nonceUsed) throw new RescueServiceError(503, "NONCE_COLLISION_RETRY");
+    const routeNonce = `0x${cryptoRandomHex32()}` as Hex;
+    const [nonceUsed, routeNonceUsed] = await Promise.all([
+      client.readContract({
+        address: config.usdc,
+        abi: nativeUsdcAbi,
+        functionName: "authorizationState",
+        args: [job.sourceAddress, nonce]
+      }),
+      client.readContract({
+        address: routerAddress,
+        abi: rescueRouterAbi,
+        functionName: "routeNonceUsed",
+        args: [job.sourceAddress, routeNonce]
+      })
+    ]);
+    if (nonceUsed || routeNonceUsed) throw new RescueServiceError(503, "NONCE_COLLISION_RETRY");
 
     const prepared = makeTransferAuthorization({
       chainKey,
       tokenName: name,
       tokenVersion: version,
       from: job.sourceAddress,
-      to: destination,
-      amountBaseUnits,
+      to: routerAddress,
+      amountBaseUnits: totalAuthorizedAmount,
       chainTimestamp: block.timestamp,
       nonce
     });
+    const rescueRoute: RescueRoute = {
+      owner: job.sourceAddress,
+      token: config.usdc,
+      amount: totalAuthorizedAmount,
+      depositAddress,
+      relayer: relayer.address,
+      reimbursementAmount: reimbursementAmountBaseUnits,
+      validAfter: prepared.message.validAfter,
+      validBefore: prepared.message.validBefore,
+      transferNonce: nonce,
+      routeNonce
+    };
     const updated = await this.repository.updateLeg(jobId, chainKey, ["quoted"], {
       status: "awaiting_authorization",
-      amountBaseUnits: amountBaseUnits.toString(),
-      destination,
+      amountBaseUnits: totalAuthorizedAmount.toString(),
+      destination: routerAddress,
       authorization: storeAuthorization(prepared.message),
+      rescueRoute: storeRescueRoute(rescueRoute),
       preparedAtBlock: block.number?.toString() ?? "0",
       lastErrorCode: null
     });
@@ -374,9 +444,24 @@ export class RescueService {
       domain: prepared.domain,
       primaryType: prepared.primaryType,
       types: prepared.types,
+      routeConsent: {
+        domain: rescueRouteDomain(chainKey, routerAddress),
+        primaryType: "RescueRoute",
+        types: rescueRouteTypes,
+        message: storeRescueRoute(rescueRoute)
+      },
+      reimbursement: {
+        amountBaseUnits: reimbursementAmountBaseUnits.toString(),
+        recipient: relayer.address,
+        configuredCapBaseUnits: routerSettings.reimbursementCapBaseUnits.toString(),
+        estimateDisclaimer: "This is the exact fixed USDC amount you authorize for the relayer, not a guaranteed conversion of actual gas cost."
+      },
+      depositAddress,
+      routerAddress,
+      totalAuthorizedAmountBaseUnits: totalAuthorizedAmount.toString(),
       victimPaysNativeGas: false,
       expiresInSeconds: Number(AUTHORIZATION_TTL_SECONDS),
-      signatureStored: false,
+      signaturesStored: false,
       quote: serializeIntentQuote(quote)
     };
   }
@@ -389,25 +474,84 @@ export class RescueService {
     if ((leg.status === "submitted" || leg.status === "source_confirmed") &&
         leg.idempotencyKeyHash?.toLowerCase() === idempotencyHash.toLowerCase()) return job;
     if (leg.status === "submitting") return this.reconcileUncertainSubmission(job, leg);
-    if (leg.status !== "awaiting_authorization" || !leg.authorization || !leg.amountBaseUnits || !leg.destination) {
+    if (leg.status !== "awaiting_authorization" || !leg.authorization || !leg.rescueRoute || !leg.amountBaseUnits || !leg.destination || !leg.intentQuote) {
       throw new RescueServiceError(409, "LEG_NOT_AWAITING_AUTHORIZATION");
+    }
+    if (quoteExpiry(leg.intentQuote).getTime() <= Date.now() + 15_000) {
+      await this.repository.updateLeg(jobId, chainKey, ["awaiting_authorization"], {
+        status: "quote_expired",
+        authorization: null,
+        rescueRoute: null,
+        destination: null,
+        amountBaseUnits: null,
+        preparedAtBlock: null,
+        estimatedRelayGasCostWei: null
+      });
+      throw new RescueServiceError(409, "QUOTE_EXPIRED_REFRESH_REQUIRED");
     }
 
     const authorization = restoreAuthorization(leg.authorization);
+    const route = restoreRescueRoute(leg.rescueRoute);
     const prepared = preparedFromStored(chainKey, authorization);
-    const signer = await recoverAuthorizationSigner(prepared, input.signature);
-    if (signer.toLowerCase() !== job.sourceAddress.toLowerCase()) {
+    const config = RESCUE_CHAINS[chainKey];
+    const routerAddress = leg.destination;
+    let authorizationSigner: Address;
+    let routeSigner: Address;
+    try {
+      [authorizationSigner, routeSigner] = await Promise.all([
+        recoverAuthorizationSigner(prepared, input.signature),
+        recoverRescueRouteSigner(chainKey, routerAddress, route, input.routeSignature)
+      ]);
+    } catch {
+      throw new RescueServiceError(400, "INVALID_USER_SIGNATURE");
+    }
+    if (authorizationSigner.toLowerCase() !== job.sourceAddress.toLowerCase() || routeSigner.toLowerCase() !== job.sourceAddress.toLowerCase()) {
       throw new RescueServiceError(400, "SIGNER_DOES_NOT_MATCH_SOURCE_WALLET");
     }
+    const providerAmount = BigInt(leg.intentQuote.requestedAmountBaseUnits);
     if (!authorizationMatches(authorization, {
       ...authorization,
-      value: BigInt(leg.amountBaseUnits),
-      to: leg.destination
-    })) throw new RescueServiceError(400, "AUTHORIZATION_DOES_NOT_MATCH_PREPARED_LEG");
+      from: route.owner,
+      value: route.amount,
+      to: routerAddress,
+      validAfter: route.validAfter,
+      validBefore: route.validBefore,
+      nonce: route.transferNonce
+    }) || !rescueRouteMatches(route, {
+      ...route,
+      owner: job.sourceAddress,
+      token: config.usdc,
+      amount: BigInt(leg.amountBaseUnits),
+      depositAddress: getAddress(leg.intentQuote.depositAddress),
+      transferNonce: authorization.nonce
+    }) || route.amount !== providerAmount + route.reimbursementAmount ||
+        route.amount !== authorization.value || route.validAfter !== authorization.validAfter ||
+        route.validBefore !== authorization.validBefore) {
+      throw new RescueServiceError(400, "ROUTE_OR_AUTHORIZATION_BINDING_MISMATCH");
+    }
 
-    const config = RESCUE_CHAINS[chainKey];
     const publicClient = getPublicClient(chainKey);
-    const [chainId, block, nonceUsed, currentBalance] = await Promise.all([
+    let routerSettings: ReturnType<typeof routerSettingsForChain>;
+    try {
+      routerSettings = routerSettingsForChain(chainKey);
+    } catch {
+      throw new RescueServiceError(503, "RESCUE_ROUTER_NOT_CONFIGURED");
+    }
+    if (routerSettings.address.toLowerCase() !== routerAddress.toLowerCase() ||
+        route.reimbursementAmount > routerSettings.reimbursementCapBaseUnits) {
+      throw new RescueServiceError(409, "RESCUE_ROUTER_CONFIGURATION_CHANGED");
+    }
+    let relayer: ReturnType<typeof getRelayerForChain>["account"];
+    let walletClient: ReturnType<typeof getRelayerForChain>["client"];
+    try {
+      ({ account: relayer, client: walletClient } = getRelayerForChain(chainKey));
+    } catch {
+      throw new RescueServiceError(503, "RELAYER_NOT_CONFIGURED");
+    }
+    if (relayer.address.toLowerCase() !== route.relayer.toLowerCase()) {
+      throw new RescueServiceError(409, "RELAYER_CONFIGURATION_CHANGED");
+    }
+    const [chainId, block, nonceUsed, routeNonceUsed, currentBalance, routerCode, routerUsdc, routerTtl] = await Promise.all([
       publicClient.getChainId(),
       publicClient.getBlock({ blockTag: "latest" }),
       publicClient.readContract({
@@ -416,51 +560,104 @@ export class RescueService {
         functionName: "authorizationState",
         args: [job.sourceAddress, authorization.nonce]
       }),
-      publicClient.readContract({ address: config.usdc, abi: nativeUsdcAbi, functionName: "balanceOf", args: [job.sourceAddress] })
+      publicClient.readContract({
+        address: routerAddress,
+        abi: rescueRouterAbi,
+        functionName: "routeNonceUsed",
+        args: [job.sourceAddress, route.routeNonce]
+      }),
+      publicClient.readContract({ address: config.usdc, abi: nativeUsdcAbi, functionName: "balanceOf", args: [job.sourceAddress] }),
+      publicClient.getCode({ address: routerAddress }),
+      publicClient.readContract({ address: routerAddress, abi: rescueRouterAbi, functionName: "usdc" }),
+      publicClient.readContract({ address: routerAddress, abi: rescueRouterAbi, functionName: "MAX_AUTHORIZATION_TTL" })
     ]);
     if (chainId !== config.chain.id) throw new RescueServiceError(502, "RPC_CHAIN_ID_MISMATCH");
+    if (!routerCode || routerCode === "0x" || routerUsdc.toLowerCase() !== config.usdc.toLowerCase() ||
+        routerTtl !== AUTHORIZATION_TTL_SECONDS || keccak256(routerCode).toLowerCase() !== routerSettings.codeHash.toLowerCase()) {
+      throw new RescueServiceError(502, "ROUTER_CODE_OR_TOKEN_MISMATCH");
+    }
     assertAuthorizationWindow(authorization, block.timestamp);
-    if (nonceUsed) throw new RescueServiceError(409, "AUTHORIZATION_NONCE_ALREADY_USED");
+    if (nonceUsed || routeNonceUsed) throw new RescueServiceError(409, "AUTHORIZATION_OR_ROUTE_NONCE_ALREADY_USED");
     if (currentBalance < authorization.value) throw new RescueServiceError(409, "CURRENT_BALANCE_TOO_LOW");
 
-    const { account: relayer, client: walletClient } = getRelayerForChain(chainKey);
     if ([job.sourceAddress, authorization.to, job.cleanRefundAddress].some((address) => address.toLowerCase() === relayer.address.toLowerCase())) {
       throw new RescueServiceError(400, "RELAYER_MUST_BE_DISTINCT");
     }
-    const { v, r, s } = signatureParts(input.signature);
+    const transferSignature = signatureParts(input.signature);
+    const routeSignature = signatureParts(input.routeSignature);
     const args = [
-      authorization.from,
-      authorization.to,
-      authorization.value,
-      authorization.validAfter,
-      authorization.validBefore,
-      authorization.nonce,
-      v,
-      r,
-      s
+      route,
+      transferSignature.v,
+      transferSignature.r,
+      transferSignature.s,
+      routeSignature.v,
+      routeSignature.r,
+      routeSignature.s
     ] as const;
     const simulation = await publicClient.simulateContract({
       account: relayer,
-      address: config.usdc,
-      abi: nativeUsdcAbi,
-      functionName: "transferWithAuthorization",
+      address: routerAddress,
+      abi: rescueRouterAbi,
+      functionName: "execute",
       args
     });
     const simulationData = encodeFunctionData({
-      abi: nativeUsdcAbi,
-      functionName: "transferWithAuthorization",
+      abi: rescueRouterAbi,
+      functionName: "execute",
       args
     });
     if (!simulation.request || simulationData.length < 10) throw new RescueServiceError(409, "SIMULATION_FAILED");
+    const [estimatedGas, fees, nativeBalance] = await Promise.all([
+      publicClient.estimateGas({ account: relayer.address, to: routerAddress, data: simulationData }),
+      publicClient.estimateFeesPerGas(),
+      publicClient.getBalance({ address: relayer.address })
+    ]);
+    const maximumFeePerGas = fees.maxFeePerGas ?? fees.gasPrice;
+    if (maximumFeePerGas === undefined) throw new RescueServiceError(503, "RELAY_GAS_PRICE_UNAVAILABLE");
+    const gasLimit = (estimatedGas * 120n + 99n) / 100n;
+    let rollupExtraFeesWei = 0n;
+    if (chainKey === "base") {
+      const feeParams = {
+        account: relayer.address,
+        to: routerAddress,
+        data: simulationData,
+        gas: gasLimit,
+        maxFeePerGas: maximumFeePerGas,
+        maxPriorityFeePerGas: fees.maxPriorityFeePerGas ?? maximumFeePerGas
+      };
+      try {
+        const [l1DataFee, operatorFee] = await Promise.all([
+          estimateL1Fee(publicClient, feeParams),
+          estimateOperatorFee(publicClient, feeParams)
+        ]);
+        // Leave 20% headroom for fee-oracle movement between estimate and inclusion.
+        rollupExtraFeesWei = ((l1DataFee + operatorFee) * 120n + 99n) / 100n;
+      } catch {
+        throw new RescueServiceError(503, "BASE_ROLLUP_FEE_ESTIMATE_UNAVAILABLE");
+      }
+    }
+    const estimatedGasCostWei = gasLimit * maximumFeePerGas + rollupExtraFeesWei;
+    if (estimatedGasCostWei > routerSettings.maxRelayGasCostWei) {
+      throw new RescueServiceError(422, "RELAY_GAS_COST_EXCEEDS_CONFIGURED_CAP", {
+        estimatedGasCostWei: estimatedGasCostWei.toString(),
+        maximumGasCostWei: routerSettings.maxRelayGasCostWei.toString()
+      });
+    }
+    // Keep enough native balance for one failed attempt plus the measured estimate.
+    if (nativeBalance < estimatedGasCostWei * 2n) throw new RescueServiceError(409, "RELAYER_NATIVE_BALANCE_TOO_LOW");
 
     const lockedJob = await this.repository.updateLeg(jobId, chainKey, ["awaiting_authorization"], {
       status: "submitting",
-      idempotencyKeyHash: idempotencyHash
+      idempotencyKeyHash: idempotencyHash,
+      estimatedRelayGasCostWei: estimatedGasCostWei.toString()
     });
     if (!lockedJob) throw new RescueServiceError(409, "SUBMISSION_ALREADY_CLAIMED");
 
     try {
-      const transactionHash = await walletClient.writeContract(simulation.request);
+      const transactionHash = await walletClient.writeContract({
+        ...simulation.request,
+        gas: gasLimit
+      });
       const submitted = await this.repository.updateLeg(jobId, chainKey, ["submitting"], {
         status: "submitted",
         transactionHash
@@ -558,9 +755,10 @@ export class RescueService {
       const receipt = await client.getTransactionReceipt({ hash: leg.transactionHash as Hex });
       const status: LegStatus = receipt.status === "success" ? "source_confirmed" : "failed";
       if (!canTransitionLeg(leg.status, status)) return job;
-      const executionGasCost = receipt.effectiveGasPrice === undefined
+      const l1DataFee = "l1Fee" in receipt && typeof receipt.l1Fee === "bigint" ? receipt.l1Fee : undefined;
+      const executionGasCost = receipt.effectiveGasPrice === undefined || (leg.chainKey === "base" && l1DataFee === undefined)
         ? undefined
-        : (receipt.gasUsed * receipt.effectiveGasPrice).toString();
+        : (receipt.gasUsed * receipt.effectiveGasPrice + (l1DataFee ?? 0n)).toString();
       const updated = await this.repository.updateLeg(job.jobId, leg.chainKey, ["submitted"], {
         status,
         ...(executionGasCost ? { receiptGasCostWei: executionGasCost } : {}),
@@ -705,6 +903,8 @@ export function serializeRescueJob(job: RescueJob) {
       intentQuote: leg.intentQuote ? serializeIntentQuote(leg.intentQuote) : undefined,
       providerStatus: leg.providerStatus,
       authorization: leg.authorization,
+      reimbursementAmountBaseUnits: leg.rescueRoute?.reimbursementAmount,
+      estimatedRelayGasCostWei: leg.estimatedRelayGasCostWei,
       transactionHash: leg.transactionHash,
       receiptGasCostWei: leg.receiptGasCostWei,
       errorCode: leg.lastErrorCode

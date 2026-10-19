@@ -2,6 +2,7 @@ import mongoose, { Schema, model, type Model } from "mongoose";
 import type { ChainKey } from "../config/chains.js";
 import { canTransitionLeg, type IntentQuoteSnapshot, type LegPatch, type LegStatus, type RescueJob } from "../domain/jobs.js";
 import type { RescueJobRepository } from "./rescue-job-repository.js";
+import { ensureRateLimitIndexes } from "./mongo-rate-limit-store.js";
 
 const authorizationSchema = new Schema({
   from: { type: String, required: true },
@@ -10,6 +11,19 @@ const authorizationSchema = new Schema({
   validAfter: { type: String, required: true },
   validBefore: { type: String, required: true },
   nonce: { type: String, required: true }
+}, { _id: false, strict: "throw" });
+
+const rescueRouteSchema = new Schema({
+  owner: { type: String, required: true },
+  token: { type: String, required: true },
+  amount: { type: String, required: true },
+  depositAddress: { type: String, required: true },
+  relayer: { type: String, required: true },
+  reimbursementAmount: { type: String, required: true },
+  validAfter: { type: String, required: true },
+  validBefore: { type: String, required: true },
+  transferNonce: { type: String, required: true },
+  routeNonce: { type: String, required: true }
 }, { _id: false, strict: "throw" });
 
 const intentQuoteSchema = new Schema<IntentQuoteSnapshot>({
@@ -49,11 +63,13 @@ const rescueLegSchema = new Schema({
   amountBaseUnits: { type: String },
   destination: { type: String },
   authorization: { type: authorizationSchema },
+  rescueRoute: { type: rescueRouteSchema },
   intentQuote: { type: intentQuoteSchema },
   providerStatus: { type: String },
   preparedAtBlock: { type: String },
   idempotencyKeyHash: { type: String },
   transactionHash: { type: String },
+  estimatedRelayGasCostWei: { type: String },
   receiptGasCostWei: { type: String },
   lastErrorCode: { type: String },
   updatedAt: { type: Date, required: true }
@@ -90,6 +106,7 @@ export async function connectMongo(uri = process.env.MONGODB_URI): Promise<void>
     autoIndex: process.env.NODE_ENV !== "production"
   });
   await RescueJobModel.createIndexes();
+  await ensureRateLimitIndexes();
 }
 
 function asRescueJob(document: unknown): RescueJob | null {

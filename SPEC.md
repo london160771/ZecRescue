@@ -44,7 +44,7 @@ One Mongo job contains separate Base and Arbitrum legs. Overall progress is deri
 
 ## 4. Authorization and source transfer
 
-Use EIP-3009 only for the verified native Circle USDC contract on Base or Arbitrum. Each authorization is one-use, amount-specific, destination/route-specific, chain-specific through domain separation, and short-lived. Enforce `validAfter`, `validBefore`, nonce-unused state, signer recovery, token, chain, route, and amount immediately before submission. The relayer is distinct from the victim and cannot redirect assets.
+Use EIP-3009 only for the verified native Circle USDC contract on Base or Arbitrum. The current hardening design signs EIP-3009 to the configured RescueRouter and requires a second EIP-712 route consent. Each is one-use, amount-specific, chain-specific through domain separation, and short-lived; together they bind the provider deposit, relayer, fixed reimbursement, and route. Enforce `validAfter`, `validBefore`, both nonce states, signer recovery, token, chain, router code hash, route, and amount immediately before submission. The relayer is distinct from the victim and cannot redirect assets. The router is not deployed; no production authorization can be submitted until an approved, audited deployment and pinned runtime code hash are configured.
 
 No approval flow is needed for EIP-3009. Never weaken destination binding to make routing easier. The victim must spend zero native gas. All broadcast UX requires clear user intent and wallet approval; no automatic signing or broadcasting.
 
@@ -101,7 +101,7 @@ Never persist seed phrases, any private key, Zcash viewing/spending keys, wallet
 
 ## 8. Relayer gas and reimbursement
 
-The relayer fronts native ETH. Production must reimburse actual or safely capped gas cost from rescued USDC without custodial pooling or arbitrary redirection. The Phase 0 record does not prove an atomic reimbursement implementation. Phase 5 must implement the safest practical route-bound design, test it adversarially, and keep all source and destination parameters signed/bound. If a minimal RescueRouter is necessary, constrain it to the exact user-approved deposit target, capped reimbursement, and deterministic behavior; no admin drain/redirect path. Any contract requires review before deployment. Never deploy or broadcast without explicit user approval.
+The relayer fronts native ETH. The current code-level design uses a minimally scoped router to atomically reimburse a **fixed USDC amount signed by the user** and forward the exact remainder to the signed provider deposit. This avoids custodial pooling or arbitrary redirection, but it does not calculate an exact reimbursement from actual gas in the contract. The server estimates buffered native gas, includes Base OP Stack L1-data/operator fee estimates, relies on Arbitrum's combined RPC gas estimate, and records actual Base receipt cost only when the receipt includes the L1 fee field. Do not call actual-gas reimbursement proven, configure production reimbursement caps, or deploy until the fee policy and chain-specific estimates receive review and the user explicitly approves deployment. Router tests are local-only and use a test token.
 
 ## 9. Failure and threat model
 

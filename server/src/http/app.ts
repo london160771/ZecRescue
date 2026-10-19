@@ -1,5 +1,6 @@
 import express, { type ErrorRequestHandler, type RequestHandler } from "express";
 import rateLimit from "express-rate-limit";
+import type { Store } from "express-rate-limit";
 import helmet from "helmet";
 import { z } from "zod";
 import { V1_CHAIN_KEYS, type ChainKey } from "../config/chains.js";
@@ -26,9 +27,12 @@ const prepareSchema = z.object({
   amountBaseUnits: z.string().regex(/^\d{1,78}$/),
   zcashRecipient: z.string().regex(/^t1[1-9A-HJ-NP-Za-km-z]{33}$/)
 }).strict();
-const emptySchema = z.object({}).strict();
+const authorizationSchema = z.object({
+  reimbursementAmountBaseUnits: z.string().regex(/^\d{1,78}$/)
+}).strict();
 const submitSchema = z.object({
   signature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
+  routeSignature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
   idempotencyKey: idempotencySchema
 }).strict();
 
@@ -48,6 +52,16 @@ function readOriginAllowlist(): Set<string> {
     }
   }
   return new Set(configured);
+}
+
+function readTrustProxyHops(): number {
+  const value = process.env.TRUST_PROXY_HOPS?.trim();
+  if (process.env.NODE_ENV === "production" && !value) {
+    throw new Error("TRUST_PROXY_HOPS must match the deployed API proxy topology in production");
+  }
+  if (!value) return 0;
+  if (!/^[0-5]$/.test(value)) throw new Error("TRUST_PROXY_HOPS must be an integer from 0 through 5");
+  return Number(value);
 }
 
 function corsForOrigins(allowedOrigins: Set<string>): RequestHandler {
@@ -96,14 +110,28 @@ const errorHandler: ErrorRequestHandler = (error: unknown, _request, response, _
   response.status(500).json({ error: "INTERNAL_ERROR" });
 };
 
-export function createApiApp(repository: RescueJobRepository) {
+export function createApiApp(repository: RescueJobRepository, rateLimitStores?: { global: Store; sensitive: Store }) {
   const app = express();
   const service = new RescueService(repository);
+  app.set("trust proxy", readTrustProxyHops());
   app.disable("x-powered-by");
   app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: "same-site" } }));
   app.use(corsForOrigins(readOriginAllowlist()));
   app.use(express.json({ limit: "16kb", strict: true }));
-  app.use("/api", rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: "draft-8", legacyHeaders: false }));
+  app.use("/api", rateLimit({
+    windowMs: 60_000,
+    limit: 60,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    ...(rateLimitStores ? { store: rateLimitStores.global } : {})
+  }));
+  const sensitiveLimiter = rateLimit({
+    windowMs: 60_000,
+    limit: 10,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    ...(rateLimitStores ? { store: rateLimitStores.sensitive } : {})
+  });
 
   app.get("/api/v1/health", (_request, response) => response.json({ status: "ok", chains: V1_CHAIN_KEYS }));
   app.post("/api/v1/scan", async (request, response) => {
@@ -130,24 +158,25 @@ export function createApiApp(repository: RescueJobRepository) {
     const job = await service.refreshJob(jobId);
     response.json({ job: serializeRescueJob(job) });
   });
-  app.post("/api/v1/jobs/:jobId/:chain/authorization", async (request, response) => {
+  app.post("/api/v1/jobs/:jobId/:chain/authorization", sensitiveLimiter, async (request, response) => {
     const jobId = parseBody(z.string().uuid(), request.params.jobId);
     const chainKey = parseChain(request.params.chain);
-    parseBody(emptySchema, request.body);
-    response.json(await service.prepareAuthorization(jobId, chainKey));
+    const body = parseBody(authorizationSchema, request.body);
+    response.json(await service.prepareAuthorization(jobId, chainKey, body));
   });
-  app.post("/api/v1/jobs/:jobId/:chain/quote", async (request, response) => {
+  app.post("/api/v1/jobs/:jobId/:chain/quote", sensitiveLimiter, async (request, response) => {
     const jobId = parseBody(z.string().uuid(), request.params.jobId);
     const chainKey = parseChain(request.params.chain);
     const body = parseBody(prepareSchema, request.body);
     response.json(await service.createIntentQuote(jobId, chainKey, body));
   });
-  app.post("/api/v1/jobs/:jobId/:chain/submit", async (request, response) => {
+  app.post("/api/v1/jobs/:jobId/:chain/submit", sensitiveLimiter, async (request, response) => {
     const jobId = parseBody(z.string().uuid(), request.params.jobId);
     const chainKey = parseChain(request.params.chain);
     const body = parseBody(submitSchema, request.body);
     const job = await service.submitAuthorization(jobId, chainKey, {
       signature: body.signature as Hex,
+      routeSignature: body.routeSignature as Hex,
       idempotencyKey: body.idempotencyKey
     });
     response.json({ job: serializeRescueJob(job) });

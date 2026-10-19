@@ -38,7 +38,7 @@ After Phase 6 and explicit user approval, the remaining funded validation is: Ba
 | Transparent ZEC→shielded Ironwood-compatible pool | **PENDING FUNDED VALIDATION** | No funded shielding transaction. Do not claim funds are shielded. |
 | Programmable local `zecrescue-agent` | **NOT IMPLEMENTED / API VALIDATION REQUIRED** | Zingo PC GUI proof does not establish a supported stable local API. Phase 3 must prove the pinned library/bridge and fail closed for unsupported capabilities. |
 | NEAR refund | **DOCUMENTATION + QUOTE CONFIG ONLY** | Quote selected `refundType: ORIGIN_CHAIN` and the user's clean Base EOA. No refund was triggered or observed. |
-| Production gas reimbursement | **UNPROVEN** | Direct authorization is simple but does not atomically reimburse gas. A tightly route-bound minimal RescueRouter is a candidate, subject to Phase 5 implementation and review. |
+| Production gas reimbursement | **NOT MAINNET PROVEN** | Phase 5 now has a code-level, locally tested route-bound router that pays a fixed user-signed USDC amount and forwards the remainder atomically. No contract is deployed. The signed reimbursement is not computed from actual gas; Base L1/data-fee accounting and production calibration remain blockers. |
 
 ## EVM native USDC and EIP-3009
 
@@ -73,9 +73,11 @@ Arbitrum had an earlier 10-USDC dry quote only. A funded Base or Arbitrum conver
 
 ## Gas reimbursement recommendation
 
-**Direct USDC authorization to a NEAR deposit address** is the simplest transfer and keeps value out of a ZecRescue-operated wallet, but it cannot atomically reimburse the relayer. A second user authorization to reimburse a fixed amount is a separate transaction and does not prove actual gas reimbursement.
+**PROVEN READ-ONLY / CODE-LEVEL DESIGN ONLY:** Direct USDC authorization to a NEAR deposit address is the simplest transfer and keeps value out of a ZecRescue-operated wallet, but it cannot atomically reimburse the relayer.
 
-For production, evaluate a **minimal route-bound RescueRouter** that uses `receiveWithAuthorization`, pays only a user-approved capped relayer reimbursement, and forwards the rest to the exact user-approved quote deposit address in one transaction. The router must be bound to a separate signed route authorization or equivalent; EIP-3009's recipient field alone does not bind arbitrary router calldata. Do not add arbitrary admin redirects, sweeping, or custody. No router is deployed or proven. Any contract needs adversarial tests/review and explicit deployment approval.
+**CODE-LEVEL ONLY:** Added a minimal route-bound `RescueRouter` using `receiveWithAuthorization`. The victim signs a second EIP-712 consent binding the exact quote deposit, relayer, fixed reimbursement, validity window, and both nonces. In one atomic call it pays the signed reimbursement and forwards the exact remaining quote amount. The contract has no owner, upgrade, arbitrary-call, redirect, or sweep path. The API verifies the router token, 300-second maximum TTL, pinned runtime code hash, route, and configured reimbursement/gas caps, and records estimates and receipt gas. Six local in-memory EVM tests use a test-only mock native-USDC token; no public chain call, deployment, or real token movement occurred.
+
+**NOT PROVEN / PRODUCTION BLOCKER:** The reimbursement is a fixed user-signed USDC amount; it is not computed from actual gas on-chain and could differ from realized cost. The API now estimates buffered Base L2 gas plus OP Stack L1-data/operator fees (with headroom); Arbitrum's gas estimate includes its L1+L2 components. It records a Base receipt's L1 fee when available, and leaves actual cost unset if that field is missing. These are code paths, not live fee validation. Neither chain's reimbursement caps have been calibrated. No router is deployed or independently audited, and the API fails closed when required deployment settings are absent. Do not claim gas reimbursement is solved or enable production relaying until these items are resolved.
 
 ## Zcash and light-client findings
 
