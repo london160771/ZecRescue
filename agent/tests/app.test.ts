@@ -25,7 +25,8 @@ class TestWalletProvider implements ZcashWalletProvider {
   async createReceivePath(sourceChain: SourceChain): Promise<ReceivePath> {
     return { pathId: "839138ae-3d5b-4e8f-b811-8f66f2fb3191", sourceChain, address: "test-only", receiverType: "transparent_p2pkh", generatedAt: new Date(0).toISOString() };
   }
-  async getReceiveStatus(pathId: string): Promise<ReceiveStatus> {
+  async getReceiveStatus(pathId: string, allowRemoteLightwalletd: true): Promise<ReceiveStatus> {
+    if (allowRemoteLightwalletd !== true) throw new Error("explicit sync consent required");
     return { pathId, state: "not_detected", amountZatoshis: "0", syncedAt: new Date(0).toISOString(), confirmations: "not_reported_by_adapter" };
   }
 }
@@ -69,5 +70,17 @@ describe("local agent HTTP safety boundary", () => {
     const prepare = await fetch(`${origin}/v1/shielding/prepare`, { method: "POST", headers, body: "{}" });
     expect(prepare.status).toBe(501);
     expect(await prepare.json()).toEqual({ error: "IRONWOOD_SHIELDING_NOT_VERIFIED" });
+  });
+
+  it("requires explicit consent before a status request can sync through remote lightwalletd", async () => {
+    await startServer();
+    const headers = { origin: "http://localhost:5173", authorization: `Bearer ${token}`, "content-type": "application/json" };
+    const pathId = "839138ae-3d5b-4e8f-b811-8f66f2fb3191";
+    const missingConsent = await fetch(`${origin}/v1/receive-paths/${pathId}/status`, { method: "POST", headers, body: "{}" });
+    expect(missingConsent.status).toBe(400);
+    const consented = await fetch(`${origin}/v1/receive-paths/${pathId}/status`, {
+      method: "POST", headers, body: JSON.stringify({ allowRemoteLightwalletd: true })
+    });
+    expect(consented.status).toBe(200);
   });
 });

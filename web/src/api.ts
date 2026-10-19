@@ -122,9 +122,11 @@ export async function createAgentPath(token: string, sourceChain: ChainKey): Pro
   });
 }
 
-export async function checkAgentPath(token: string, pathId: string): Promise<{ state: string; amountZatoshis: string; syncedAt: string }> {
+export async function checkAgentPath(token: string, pathId: string, allowRemoteLightwalletd: true): Promise<{ state: string; amountZatoshis: string; syncedAt: string }> {
   return requestJson(agent(`/v1/receive-paths/${encodeURIComponent(pathId)}/status`), {
-    headers: { Authorization: `Bearer ${token}` }
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ allowRemoteLightwalletd })
   });
 }
 

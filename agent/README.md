@@ -19,13 +19,13 @@ Every request requires the local bearer token, an allowed `Origin` when supplied
 | `GET /healthz` | Mainnet agent liveness | Available |
 | `GET /v1/capabilities` | Wallet file and operation capability flags | Available; reports `source_review_only`, not live proof |
 | `POST /v1/receive-paths` `{ "sourceChain": "base" \| "arbitrum" }` | Generate a unique transparent receiver through Zingolib CLI; return its one-time `pathId` | Available when explicitly configured with an existing wallet |
-| `GET /v1/receive-paths/:pathId/status` | Wait for CLI light-client sync, then inspect the exact locally generated receiver | Available when CLI response schema is recognized; path index is memory-only |
+| `POST /v1/receive-paths/:pathId/status` `{ "allowRemoteLightwalletd": true }` | Sync through configured remote lightwalletd, then inspect the exact locally generated receiver | Requires explicit browser-session consent; CLI response schema remains source-review-only |
 | `POST /v1/shielding/prepare` | Prepare a source-isolated Ironwood shield | Returns `501 IRONWOOD_SHIELDING_NOT_VERIFIED` |
 | `POST /v1/shielding/:preparationId/approve` `{}` | Local approval step | Disabled |
 | `POST /v1/transactions/:txid/broadcast` `{}` | Broadcast a locally approved txid | Disabled |
 | `POST /v1/withdrawals/prepare` | Prepare an approved local withdrawal | Disabled |
 
-The `pathId` to chain/address association is stored in `.zecrescue-agent-paths.json` inside the configured local wallet directory so monitoring survives an agent restart. It contains only public receivers and source-chain labels, no EVM address or key material. It is local-only and git-ignored. The address may be sent transiently to the quote API, but the hosted database must not retain a permanent Recovery Vault mapping.
+The `pathId` to chain/address association is stored in `.zecrescue-agent-paths.json` inside the configured local wallet directory so monitoring survives an agent restart. It contains only public receivers and source-chain labels, no EVM address or key material. It is local-only and git-ignored. The address may be sent transiently to the quote API, but the hosted database must not retain a permanent Recovery Vault mapping. Status checks contact remote lightwalletd; that service may observe the device IP and wallet scan queries. The UI requires explicit session-only consent before making a status request. No Zcash key is sent to lightwalletd or the hosted backend by this agent.
 
 ## Current Zingolib limitation
 

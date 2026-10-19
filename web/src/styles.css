@@ -437,6 +437,10 @@ input[aria-invalid="true"] { border-color: #cc7669; }
 
 .agent-token-label { display: block; margin-top: 10px; color: #647269; font-size: 9px; font-weight: 700; }
 
+.agent-sync-consent { display: flex; align-items: flex-start; gap: 8px; margin-top: 10px; padding: 9px; color: #6d6754; border: 1px solid #e9dfc3; border-radius: 6px; background: #fffaf0; font-size: 9px; line-height: 1.5; }
+
+.agent-sync-consent input { flex: 0 0 auto; margin: 2px 0 0; accent-color: #38694f; }
+
 .capability-note { margin-top: 12px; padding: 10px; border-radius: 6px; }
 
 .capability-note.blocked { color: #765821; background: #fff5dc; }

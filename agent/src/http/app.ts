@@ -8,6 +8,7 @@ import { AgentError } from "../errors.js";
 import type { ZcashWalletProvider } from "../wallet-provider.js";
 
 const receiveSchema = z.object({ sourceChain: z.enum(["base", "arbitrum"]) }).strict();
+const syncSchema = z.object({ allowRemoteLightwalletd: z.literal(true) }).strict();
 const emptySchema = z.object({}).strict();
 
 function localRequestGuard(config: AgentConfig): RequestHandler {
@@ -74,9 +75,10 @@ export function createAgentApp(config: AgentConfig, provider: ZcashWalletProvide
     const body = parseBody(receiveSchema, request.body);
     response.status(201).json(await provider.createReceivePath(body.sourceChain));
   });
-  app.get("/v1/receive-paths/:pathId/status", async (request, response) => {
+  app.post("/v1/receive-paths/:pathId/status", async (request, response) => {
     const pathId = parseBody(z.string().uuid(), request.params.pathId);
-    response.json(await provider.getReceiveStatus(pathId));
+    const body = parseBody(syncSchema, request.body);
+    response.json(await provider.getReceiveStatus(pathId, body.allowRemoteLightwalletd));
   });
 
   // These paths are intentionally present in the API contract but disabled until

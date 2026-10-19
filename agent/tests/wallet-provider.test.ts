@@ -90,7 +90,7 @@ describe("ZingoCliWalletProvider", () => {
     }));
     const provider = new ZingoCliWalletProvider(cliPath, dataDir, runner as never);
     const path = await provider.createReceivePath("arbitrum");
-    await expect(provider.getReceiveStatus(path.pathId)).rejects.toMatchObject({ code: "ZINGO_RESPONSE_UNSUPPORTED" });
+    await expect(provider.getReceiveStatus(path.pathId, true)).rejects.toMatchObject({ code: "ZINGO_RESPONSE_UNSUPPORTED" });
   });
 
   it("persists only the local chain-to-receiver path so monitoring survives agent restart", async () => {
@@ -112,7 +112,7 @@ describe("ZingoCliWalletProvider", () => {
       };
     });
     const restartedProvider = new ZingoCliWalletProvider(cliPath, dataDir, monitorRunner as never);
-    const status = await restartedProvider.getReceiveStatus(path.pathId);
+    const status = await restartedProvider.getReceiveStatus(path.pathId, true);
     expect(status).toMatchObject({ state: "received", amountZatoshis: "42" });
     expect(monitorRunner).toHaveBeenCalledWith(
       cliPath,

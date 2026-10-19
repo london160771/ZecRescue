@@ -48,7 +48,7 @@ export type ReceiveStatus = {
 export interface ZcashWalletProvider {
   getCapabilities(): Promise<AgentCapabilities>;
   createReceivePath(sourceChain: SourceChain): Promise<ReceivePath>;
-  getReceiveStatus(pathId: string): Promise<ReceiveStatus>;
+  getReceiveStatus(pathId: string, allowRemoteLightwalletd: true): Promise<ReceiveStatus>;
 }
 
 type ConfiguredWallet = {
@@ -154,7 +154,8 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
     });
   }
 
-  async getReceiveStatus(pathId: string): Promise<ReceiveStatus> {
+  async getReceiveStatus(pathId: string, allowRemoteLightwalletd: true): Promise<ReceiveStatus> {
+    if (allowRemoteLightwalletd !== true) throw new AgentError(400, "LIGHTWALLETD_CONSENT_REQUIRED");
     return this.serialized(async () => {
       const wallet = await this.getConfiguredWallet();
       await this.loadPathRegistry(wallet.dataDir);

@@ -84,3 +84,12 @@
 ## Final validation state
 
 **PENDING FINAL PHASE 0 FUNDED VALIDATION.** Required Base/Arbitrum USDC→ZEC, incoming-ZEC detection, transparent-to-Ironwood-compatible shielding, and final end-to-end proof will occur only after Phase 6 and explicit user approval.
+
+## Post-Phase 6 security follow-up — remote wallet sync consent
+
+- **Finding:** The local agent's receiver-status request could initiate a remote lightwalletd sync without the UI explaining that the service may observe the user's IP and wallet scan queries.
+- **Change:** Status checks now use an explicit POST consent field, and the UI requires a session-only opt-in with a clear disclosure before requesting a sync. The request remains loopback-only; no Zcash key material is sent to lightwalletd or the hosted API. Corrected `agent/README.md` to describe the persistent local receiver manifest accurately.
+- **Verification:** `npm test` — 51 passed (14 files); `npm run typecheck` — passed; `npm run lint` — passed; `npm run build:web` — passed; `npm run build:api` — passed; `npm run build:agent` — passed; `npm run build:contracts` — compiled all three contracts; `git diff --check` — passed.
+- **Security review:** Tests exercise consent validation with an in-process test provider. No wallet file was opened, lightwalletd sync was not attempted, and no funds, keys, signatures, or transactions were involved.
+- **Unresolved:** The current installed Zingolib build, wallet sync schema, source-isolated shielding, Ironwood destination, and local signing/broadcast path remain unverified and disabled. Final funded validation remains pending user approval.
+- **Commit:** Pending.

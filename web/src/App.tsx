@@ -131,6 +131,7 @@ function App() {
   const [agentCapabilities, setAgentCapabilities] = useState<AgentCapabilities | null>(null);
   const [agentPaths, setAgentPaths] = useState<Partial<Record<ChainKey, AgentPath>>>({});
   const [agentPathStatuses, setAgentPathStatuses] = useState<Partial<Record<ChainKey, string>>>({});
+  const [allowRemoteLightwalletd, setAllowRemoteLightwalletd] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -171,6 +172,7 @@ function App() {
     setSignatures({});
     setReceivers({ base: "", arbitrum: "" });
     setAgentPaths({});
+    setAllowRemoteLightwalletd(false);
   }, [address]);
 
   const runAction = useCallback(async (label: string, task: () => Promise<void>) => {
@@ -271,7 +273,8 @@ function App() {
     const path = agentPaths[chain];
     if (!path) return;
     await runAction(`agent-status-${chain}`, async () => {
-      const status = await checkAgentPath(agentToken.trim(), path.pathId);
+      if (!allowRemoteLightwalletd) throw new Error("Allow this wallet sync first. It contacts the configured remote lightwalletd service.");
+      const status = await checkAgentPath(agentToken.trim(), path.pathId, true);
       setAgentPathStatuses((current) => ({ ...current, [chain]: status.state === "received"
         ? `${formatBaseUnits(status.amountZatoshis, 8, 8)} ZEC reported by the local adapter. Verify the wallet transaction before treating it as confirmed.`
         : "No matching transparent balance reported by the local adapter. This is not a completed-sync proof." }));
@@ -376,7 +379,7 @@ function App() {
       <div className="receiver-control">
         <label htmlFor={`${chain}-receiver`}>Zcash receiver <span>unique public t1 per chain</span></label>
         <input id={`${chain}-receiver`} autoComplete="off" spellCheck={false} placeholder="Enter this chain’s Zingo PC t1 receiver" value={receivers[chain]} onChange={(event) => setReceivers((current) => ({ ...current, [chain]: event.target.value.trim() }))} />
-        {agentPaths[chain] ? <div className="inline-local-state"><span>{agentPathStatuses[chain] ?? "Locally generated receiver"}</span><button type="button" className="text-button" onClick={() => void handleAgentStatus(chain)} disabled={Boolean(busyAction)}>Check local wallet</button></div> : <p className="field-hint">Transparent t1 only at the provider boundary. ZEC remains public until a verified shield flow.</p>}
+        {agentPaths[chain] ? <div className="inline-local-state"><span>{agentPathStatuses[chain] ?? "Locally generated receiver"}</span><button type="button" className="text-button" onClick={() => void handleAgentStatus(chain)} disabled={Boolean(busyAction) || !allowRemoteLightwalletd}>Check local wallet</button></div> : <p className="field-hint">Transparent t1 only at the provider boundary. ZEC remains public until a verified shield flow.</p>}
       </div>
 
       {!quote && <button className="button button-secondary button-wide" type="button" disabled={!scan || !refundValid || !isTAddress(receivers[chain]) || !amounts[chain] || Boolean(busyAction)} onClick={() => void handleQuote(chain)}>
@@ -520,6 +523,7 @@ function App() {
               <label className="agent-token-label" htmlFor="agent-token">Local session token</label>
               <input id="agent-token" type="password" autoComplete="off" placeholder="From the local agent terminal" value={agentToken} onChange={(event) => setAgentToken(event.target.value)} />
               <button type="button" className="button button-secondary button-wide" onClick={() => void handleAgentConnect()} disabled={Boolean(busyAction) || !agentToken.trim()}>{busyAction === "agent" ? "Checking capabilities…" : "Check wallet capabilities"}</button>
+              <label className="agent-sync-consent"><input type="checkbox" checked={allowRemoteLightwalletd} onChange={(event) => setAllowRemoteLightwalletd(event.target.checked)} /><span>Allow wallet status checks to contact the configured remote lightwalletd. It may observe this device’s IP and wallet scan queries; Zcash keys stay local. This choice lasts only for this tab.</span></label>
             </>}
             {agentCapabilities && <div className={`capability-note ${agentCapabilities.verification === "verified" ? "verified" : "blocked"}`}><strong>{agentCapabilities.verification === "verified" ? "Wallet layer verified" : "Not live-verified"}</strong><p>{agentCapabilities.limitations[0] ?? "Shield preparation, signing, and broadcast are disabled."}</p></div>}
             {agentCapabilities?.verification === "verified" && <div className="agent-tools">{chainKeys.map((chain) => <button type="button" className="agent-path-button" key={chain} disabled={Boolean(busyAction) || !agentCapabilities.canGenerateTransparentReceiver} onClick={() => void handleAgentPath(chain)}>{agentPaths[chain] ? `${chainMetadata[chain].name} path ready` : `Create ${chainMetadata[chain].name} receiver`}</button>)}</div>}
