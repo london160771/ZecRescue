@@ -19,7 +19,7 @@ Browser (React/Vite)
                               └── remote lightwalletd
 ```
 
-The hosted API never connects to Zallet RPC, never receives Zcash keys, and never retains Recovery Vault identity. The agent is bound to loopback. No Zebra, zecd, or full node is installed or required. Zingo PC is the Phase 0 proof candidate; its GUI success is not proof of a programmatic API. The current code adds a Zingolib CLI adapter, but a live wallet has not been configured or exercised by it.
+The hosted API never connects to a Zcash wallet, never receives Zcash keys, and never retains Recovery Vault identity. The agent is bound to loopback. No Zebra, zecd, or full node is installed or required. The current adapter loads the installed Zingo PC 2.0.26 Windows x64 native addon, pinned by version and SHA-256. This is an internal, unsupported interface. We verified that the binary loads and reports its version, but did not open a wallet or run any wallet operation.
 
 ## 3. Frontend
 
@@ -76,18 +76,19 @@ Persist quote ID/expiry/deposit data only for the operational period. Do not put
 
 ## 7. Local Zcash agent
 
-The agent owns the only interface to the local light wallet. Implemented allowlisted API:
+The agent owns the only interface to the local light wallet. Its strict allowlisted API is:
 
-- `GET /healthz` and `GET /v1/capabilities`;
-- `POST /v1/receive-paths` to create a fresh transparent per-leg receiver and return a public address plus ephemeral handle;
-- `POST /v1/receive-paths/:pathId/status` with explicit remote-lightwalletd consent to inspect that local receiver after light-client sync;
-- `POST /v1/shielding/prepare` accepts only a local `pathId`; it returns `501 SOURCE_SCOPED_SHIELD_BRIDGE_REQUIRED` until a local bridge can form and audit an exact-address proposal. Approval, broadcast, and withdrawal routes remain explicit `501` blockers.
+- `GET /healthz`, token-protected `GET /v1/capabilities`, and explicit consented `POST /v1/wallet/open` for an existing wallet;
+- `GET /v1/receive-paths` and consented `POST /v1/receive-paths` to create separate fresh Base and Arbitrum transparent receivers;
+- consented `POST /v1/receive-paths/:pathId/status` to inspect a registered receiver after light-client sync;
+- consented `POST /v1/shielding/prepare` for the fixed all-eligible-transparent account scope;
+- explicit `POST /v1/shielding/:preparationId/approve`, bound to the local preparation hash, followed by consented status polling.
 
-The service requires a random local bearer token, exact browser-origin allowlist, valid loopback host, strict schemas, request-size limits, and a fixed CLI command allowlist. It never accepts arbitrary JSON-RPC or key material. The token remains in the local browser session and is never sent to the hosted API. A local git-ignored manifest stores only the path ID, source-chain label, and public receive address so monitoring survives restart; it contains no EVM address or key material. The local service uses the existing wallet only when `zingo-wallet.dat` is present, and refuses to initialize a wallet. The user must close Zingo PC before opening the same wallet directory through CLI to avoid concurrent writers. Each sync requires explicit browser consent because remote lightwalletd may observe the user's IP and wallet scan queries; keys remain local.
+The service requires a random local bearer token, exact browser-origin allowlist, loopback Host, strict schemas, request-size limits, and a fixed native-method allowlist. It never accepts arbitrary RPC, URL, shell input, key material, or raw addon access. The token remains in local browser memory and is never sent to the hosted API. A local manifest under the agent state directory stores only path ID, source-chain label, and public receiver. It has no EVM address or key material. The agent opens only an already existing wallet and refuses to create or import one. Zingo PC must be closed before the agent opens the same wallet directory. Each remote lightwalletd operation requires explicit browser-session consent. A hosted HTTPS app may also trigger the browser's local-network permission prompt before contacting the loopback agent; the user must allow this origin. The agent answers private-network preflights only for configured origins. See [Chrome Local Network Access](https://developer.chrome.com/blog/local-network-access).
 
-Official Zingolib v7.0.0 and its current `dev` source gather every wallet transparent address inside the private `LightWallet::create_shield_proposal` method. Its public `LightClient::propose_shield` wrapper cannot restrict that list, and the CLI exposes neither a source-address argument nor selected-input evidence. The same private method hardcodes Orchard as the shield output pool. NU6.3 activated on Mainnet at height 3,428,143 and restricts Orchard, so the stock shield and quickshield commands are not a valid Recovery Vault path.
+V1 uses a distinct fresh t1 receiver for Base and Arbitrum and reports their balances separately. Shielding is account-level and may consume both chains' transparent funds in one transaction. The user must use a dedicated Recovery Vault with no unrelated transparent funds. The UI shows the separate chain balances, account-wide total, fee, expected Ironwood output, and explicit disclosure that Base and Arbitrum can correlate before shielding. The agent rejects transparent balances not assigned to an agent-created source path. The proposal is not signed or broadcast until the user separately approves the matching, unexpired preparation; a lost broadcast response is never retried automatically.
 
-The lower-level `zcash_client_backend::data_api::wallet::propose_shielding` API accepts `from_addrs`, and the proposal change strategy can name the output pool. This establishes a possible custom bridge design: one existing user-controlled wallet, one unique transparent receiver per source chain, exact-address input selection, selected-input audit, and Ironwood output under current consensus. However, Zingolib does not expose a supported method that connects this lower-level proposal to its private proposal storage and local signing/transmission flow. A fork or upstream API change would be required; it is not implemented or verified. No extra account or wallet has been created. The agent accepts only a locally registered `pathId` and fails closed with `SOURCE_SCOPED_SHIELD_BRIDGE_REQUIRED`. Do not enable shield preparation, signing, or broadcast until a reviewed bridge and the user's local wallet runtime are verified. A status error or unknown schema must never be rendered as “no funds received.”
+The installed Zingo PC 2.0.26 source map separates `shield()` proposal creation from `confirm()` submission and states that the app wrapper redirects transparent shielding to Ironwood under NU6.3. The addon reported `zl_6.0.0_6d43e`; neither wallet open nor shield/confirm was tested. The adapter's capability gate remains false until local `.env` explicitly sets `ZINGO_SHIELDING_RUNTIME_VERIFIED=1` alongside the dedicated-wallet acknowledgement. This gate requires owner runtime verification; it is not set by the code. An internal native API may change without a stable SDK contract, so version/hash mismatches fail closed and future Zingo PC upgrades need a new review. Never use `quickshield`, expose arbitrary native methods, or invent an `ironwood` RPC parameter. Unknown wallet status is an error, not “no funds received.”
 
 ## 8. Data model
 
@@ -132,7 +133,7 @@ Check relayer network balance, estimated gas and maximum allowed reimbursement b
 
 ## 11. User-visible states
 
-The Phase 6 UI implements the sequence: connected wallet, per-chain detected amount, clean refund address, quote/costs, exact token/router/amount/destination/reimbursement EIP-712 summary, user signature, explicit relayer submission, provider/source-chain status, and local Zcash capability/status. It intentionally blocks the claim or action of shield completion while the local wallet and Ironwood operation remain unverified.
+The Phase 6 UI implements the sequence: connected wallet, per-chain detected amount, clean refund address, quote/costs, exact token/router/amount/destination/reimbursement EIP-712 summary, user signature, explicit relayer submission, provider/source-chain status, and local Zcash capability/status. The agent panel can open the existing local wallet with explicit remote-sync consent, create separate Base/Arbitrum t1 receivers, and—only when the local runtime gate is enabled—prepare and display an account-level shield proposal before a second explicit local approval. It blocks the claim of shielding until local wallet status and Ironwood confirmation are returned.
 
 Display:
 

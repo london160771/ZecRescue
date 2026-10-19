@@ -14,7 +14,7 @@
     "build:web": "tsc -p tsconfig.web.json --noEmit && vite build --config vite.config.ts",
     "preview:web": "vite preview --config vite.config.ts --host 127.0.0.1",
     "dev:api": "tsx server/src/main.ts",
-    "dev:agent": "tsx agent/src/main.ts",
+    "dev:agent": "node --env-file-if-exists=.env --import tsx agent/src/main.ts",
     "build:api": "tsc -p tsconfig.api.json",
     "build:contracts": "node contracts/scripts/compile.mjs",
     "test:contracts": "vitest run contracts/tests/rescue-router.test.ts",

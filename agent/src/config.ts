@@ -1,11 +1,17 @@
 import { randomBytes } from "node:crypto";
+import { join } from "node:path";
 
 export type AgentConfig = {
   port: number;
   accessToken: string;
   allowedOrigins: ReadonlySet<string>;
-  zingoCliPath?: string;
-  zingoDataDir?: string;
+  zingoNativePath?: string;
+  zingoWalletBaseDir?: string;
+  zingoWalletName?: string;
+  zingoLightwalletdUri?: string;
+  zingoStateDir?: string;
+  zingoRecoveryWalletDedicated: boolean;
+  zingoShieldingRuntimeVerified: boolean;
 };
 
 export function loadAgentConfig(env: NodeJS.ProcessEnv = process.env): AgentConfig {
@@ -37,17 +43,43 @@ export function loadAgentConfig(env: NodeJS.ProcessEnv = process.env): AgentConf
     }
   }
 
-  const zingoCliPath = env.ZINGO_CLI_PATH?.trim();
-  const zingoDataDir = env.ZINGO_DATA_DIR?.trim();
-  if (Boolean(zingoCliPath) !== Boolean(zingoDataDir)) {
-    throw new Error("ZINGO_CLI_PATH and ZINGO_DATA_DIR must be configured together");
+  const defaultNativePath = env.LOCALAPPDATA
+    ? join(env.LOCALAPPDATA, "Programs", "zingo-pc", "resources", "app.asar.unpacked", "build", "native.node")
+    : undefined;
+  const zingoNativePath = env.ZINGO_PC_NATIVE_PATH?.trim() || defaultNativePath;
+  const zingoWalletBaseDir = env.ZINGO_WALLET_BASE_DIR?.trim();
+  const zingoWalletName = env.ZINGO_WALLET_NAME?.trim();
+  const zingoLightwalletdUri = env.ZINGO_LIGHTWALLETD_URI?.trim();
+  const zingoStateDir = env.ZECRESCUE_AGENT_STATE_DIR?.trim();
+  const walletValues = [zingoWalletBaseDir, zingoWalletName, zingoLightwalletdUri];
+  if (walletValues.some(Boolean) && !walletValues.every(Boolean)) {
+    throw new Error("ZINGO_WALLET_BASE_DIR, ZINGO_WALLET_NAME, and ZINGO_LIGHTWALLETD_URI must be configured together");
+  }
+  const dedicatedValue = env.ZINGO_RECOVERY_WALLET_DEDICATED ?? "0";
+  if (dedicatedValue !== "0" && dedicatedValue !== "1") {
+    throw new Error("ZINGO_RECOVERY_WALLET_DEDICATED must be 0 or 1");
+  }
+  if (dedicatedValue === "1" && !walletValues.every(Boolean)) {
+    throw new Error("The dedicated-wallet acknowledgement requires a complete ZINGO wallet configuration");
+  }
+  const verifiedValue = env.ZINGO_SHIELDING_RUNTIME_VERIFIED ?? "0";
+  if (verifiedValue !== "0" && verifiedValue !== "1") {
+    throw new Error("ZINGO_SHIELDING_RUNTIME_VERIFIED must be 0 or 1");
+  }
+  if (verifiedValue === "1" && dedicatedValue !== "1") {
+    throw new Error("Shielding runtime verification requires the dedicated Recovery Vault acknowledgement");
   }
 
   return {
     port,
     accessToken,
     allowedOrigins,
-    ...(zingoCliPath ? { zingoCliPath } : {}),
-    ...(zingoDataDir ? { zingoDataDir } : {})
+    ...(zingoNativePath ? { zingoNativePath } : {}),
+    ...(zingoWalletBaseDir ? { zingoWalletBaseDir } : {}),
+    ...(zingoWalletName ? { zingoWalletName } : {}),
+    ...(zingoLightwalletdUri ? { zingoLightwalletdUri } : {}),
+    ...(zingoStateDir ? { zingoStateDir } : {}),
+    zingoRecoveryWalletDedicated: dedicatedValue === "1",
+    zingoShieldingRuntimeVerified: verifiedValue === "1"
   };
 }

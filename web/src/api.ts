@@ -1,4 +1,4 @@
-import type { AgentCapabilities, AgentPath, AuthorizationEnvelope, ChainKey, RescueJob, ScanResult } from "./types";
+import type { AgentCapabilities, AgentPath, AgentShieldPreparation, AgentShieldStatus, AuthorizationEnvelope, ChainKey, RescueJob, ScanResult } from "./types";
 
 const apiOrigin = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, "") ?? "";
 const agentOrigin = (import.meta.env.VITE_LOCAL_AGENT_URL as string | undefined) ?? "http://127.0.0.1:4180";
@@ -114,11 +114,23 @@ export async function getAgentCapabilities(token: string): Promise<AgentCapabili
   return requestJson(agent("/v1/capabilities"), { headers: { Authorization: `Bearer ${token}` } });
 }
 
-export async function createAgentPath(token: string, sourceChain: ChainKey): Promise<AgentPath> {
+export async function openAgentWallet(token: string, allowRemoteLightwalletd: true): Promise<AgentCapabilities> {
+  return requestJson(agent("/v1/wallet/open"), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ allowRemoteLightwalletd })
+  });
+}
+
+export async function listAgentPaths(token: string): Promise<AgentPath[]> {
+  return requestJson(agent("/v1/receive-paths"), { headers: { Authorization: `Bearer ${token}` } });
+}
+
+export async function createAgentPath(token: string, sourceChain: ChainKey, allowRemoteLightwalletd: true): Promise<AgentPath> {
   return requestJson(agent("/v1/receive-paths"), {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ sourceChain })
+    body: JSON.stringify({ sourceChain, allowRemoteLightwalletd })
   });
 }
 
@@ -126,6 +138,30 @@ export async function checkAgentPath(token: string, pathId: string, allowRemoteL
   return requestJson(agent(`/v1/receive-paths/${encodeURIComponent(pathId)}/status`), {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ allowRemoteLightwalletd })
+  });
+}
+
+export async function prepareAgentShield(token: string, allowRemoteLightwalletd: true): Promise<AgentShieldPreparation> {
+  return requestJson(agent("/v1/shielding/prepare"), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ scope: "all_eligible_transparent", allowRemoteLightwalletd })
+  });
+}
+
+export async function approveAgentShield(token: string, preparation: AgentShieldPreparation, allowRemoteLightwalletd: true): Promise<{ preparationId: string; state: "submitted" | "broadcast_outcome_unknown"; txids: string[]; submittedAt: string }> {
+  return requestJson(agent(`/v1/shielding/${encodeURIComponent(preparation.preparationId)}/approve`), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ confirm: true, preparationHash: preparation.preparationHash, allowRemoteLightwalletd })
+  });
+}
+
+export async function checkAgentShield(token: string, preparationId: string, allowRemoteLightwalletd: true): Promise<AgentShieldStatus> {
+  return requestJson(agent(`/v1/shielding/${encodeURIComponent(preparationId)}/status`), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify({ allowRemoteLightwalletd })
   });
 }

@@ -103,18 +103,46 @@ export type AuthorizationEnvelope = {
 
 export type AgentCapabilities = {
   network: "mainnet";
-  walletLayer: "not_configured" | "zingo_cli";
+  walletLayer: "not_configured" | "zingo_pc_native";
   walletFilePresent: boolean;
   zingoVersion: string | null;
-  verification: "not_configured" | "source_review_only" | "verified";
+  verification: "not_configured" | "native_runtime_loaded_wallet_unverified" | "wallet_open_runtime_unverified";
+  walletOpen: boolean;
   canGenerateTransparentReceiver: boolean;
   canMonitorReceiver: boolean;
   canGenerateIronwoodReceiver: false;
-  canPrepareShielding: false;
-  canSignLocally: false;
-  canBroadcast: false;
+  canPrepareShielding: boolean;
+  canSignLocally: boolean;
+  canBroadcast: boolean;
   canPrepareWithdrawal: false;
+  shieldingScope: "account_level" | null;
+  privacyDisclosure: string;
   limitations: string[];
 };
 
-export type AgentPath = { pathId: string; address: string; sourceChain: ChainKey };
+export type AgentPath = { pathId: string; address: string; sourceChain: ChainKey; accountId: 0; receiverType: "transparent_p2pkh"; generatedAt: string };
+
+export type AgentShieldPreparation = {
+  preparationId: string;
+  preparationHash: string;
+  state: "awaiting_approval";
+  scope: "all_eligible_transparent";
+  sourceAmounts: { sourceChain: ChainKey; amountZatoshis: string }[];
+  totalInputZatoshis: string;
+  feeZatoshis: string;
+  expectedIronwoodAmountZatoshis: string;
+  confirmedIronwoodBeforeZatoshis: string;
+  targetPool: "ironwood";
+  preparedAt: string;
+  expiresAt: string;
+  disclosure: string;
+};
+
+export type AgentShieldStatus = {
+  preparationId: string;
+  state: "awaiting_approval" | "submitted" | "pending" | "confirmed" | "confirmed_transparent_remaining" | "failed" | "expired" | "broadcast_outcome_unknown";
+  txids: string[];
+  ironwoodConfirmed: boolean;
+  transparentBalanceRemainingZatoshis: string | null;
+  checkedAt: string;
+};

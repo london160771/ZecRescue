@@ -67,7 +67,7 @@ Map provider states conservatively. Do not claim the provider emits `UNDER_REVIE
 
 ## 6. Recovery Vault and local agent
 
-V1 uses a light-client Zcash architecture; do not install Zebra, zecd, or a full node. Phase 0 proof used Zingo PC, but that does not establish that its GUI exposes a programmable local API. The product target is the smallest maintainable Zingo/Zingolib-compatible local wallet layer accessed through `zecrescue-agent` and remote lightwalletd.
+V1 uses a light-client Zcash architecture; do not install Zebra, zecd, or a full node. Phase 0 proof used Zingo PC 2.0.26 on Windows. The current prototype uses its pinned Windows x64 native addon through a strict TypeScript allowlist and remote lightwalletd. This is an internal, unsupported Zingo PC interface; the exact version and binary hash must match or the agent fails closed.
 
 ```text
 React app → hosted orchestrator → localhost zecrescue-agent
@@ -81,15 +81,17 @@ Required local capabilities (only expose an operation as enabled after its walle
 - create/derive a user-controlled receiving path locally;
 - separate temporary receiving path for Base and Arbitrum;
 - monitor incoming ZEC and confirmation state;
-- prepare shielding transaction;
-- request local user approval/signing;
-- broadcast via supported light-client service;
+- prepare an account-level transparent shielding proposal;
+- disclose every chain's registered input amount, total input, fee, expected output, and privacy boundary;
+- require a separate explicit local user approval before signing and broadcasting;
 - report transaction and shielded-pool status;
-- prepare a user-approved withdrawal.
+- leave withdrawals disabled until a separate reviewed flow is built.
 
-The Phase 3 agent's API is `GET /healthz`, `GET /v1/capabilities`, `POST /v1/receive-paths`, `POST /v1/receive-paths/:pathId/status` with explicit `allowRemoteLightwalletd: true` consent, and `POST /v1/shielding/prepare` with only `{ "pathId": "…" }`. The last route accepts no caller-supplied address and remains blocked until a source-scoped local bridge is available. It binds to `127.0.0.1`, uses a random local bearer token and exact origin allowlist, and never accepts key material or arbitrary RPC/CLI input. Path IDs map only to a chain label, account ID, and public receiver in a local ignored manifest. A status sync contacts remote lightwalletd and may reveal the user's IP and wallet scan queries; the browser requires an explicit opt-in for the session. Receiver/status commands require the CLI `version` output to equal the pinned `zingolib_v6.0.0`, but this version gate is not live wallet verification.
+The Phase 3 agent's API includes `GET /healthz`, token-protected `GET /v1/capabilities`, consented `POST /v1/wallet/open`, `GET/POST /v1/receive-paths`, consented receiver status, `POST /v1/shielding/prepare` with the fixed `{ "scope": "all_eligible_transparent" }`, explicit `POST /v1/shielding/:preparationId/approve` bound to the returned preparation hash, and consented status polling. It binds to `127.0.0.1`, checks the Host and exact allowed origins, uses a random local bearer token, strict schemas, bounded bodies/rates, and exposes no key, generic-send, arbitrary RPC, URL, or shell interface. The receiver-to-chain manifest is local under the user's agent state directory; MongoDB never receives the Recovery Vault identity. A remote lightwalletd can observe the user's IP and scan queries, so the UI requires per-session consent before opening/syncing or checking status.
 
-The smallest candidate design is one existing user-controlled Zingo wallet/account with a distinct transparent receiver per chain and exact-address selection through `propose_shielding(from_addrs)`. This is not currently available through a supported Zingolib method: Zingolib v7.0.0 and `dev` hide proposal creation behind a private method that includes every wallet transparent address, hardcodes Orchard output, and does not expose selected inputs. The public LightClient wrapper and stock CLI cannot provide source isolation or Ironwood output. Orchard is restricted after Mainnet NU6.3 activation. A reviewed Zingolib bridge/fork or upstream API change is required before the candidate design can be implemented; until then the agent returns `SOURCE_SCOPED_SHIELD_BRIDGE_REQUIRED`, and shielding, signing, and broadcast remain disabled. No additional wallet/account has been created, and the `ironwood` label must not be sent as an invented RPC parameter.
+The locked source-isolation decision for V1 is to keep distinct fresh Base and Arbitrum `t1` receivers and track their balances separately, then allow a **single account-level shield** of all eligible transparent inputs in the dedicated Recovery Vault. The account-level transaction does not preserve source isolation; the two public rescue paths can remain correlatable before shielding. Require a dedicated Recovery Vault without unrelated transparent funds. The agent rejects unassigned transparent balances and displays per-chain inputs, total, fee, expected Ironwood output, and this disclosure before the user can approve. Privacy begins only after local wallet status confirms Ironwood inclusion. Do not claim retroactive privacy.
+
+The installed Zingo PC 2.0.26 source map documents a two-step path: `shield()` prepares a proposal, and `confirm()` submits it; its app wrapper comments that transparent shielding redirects to Ironwood under NU6.3. The addon was loaded read-only and reported `zl_6.0.0_6d43e`; no wallet was opened and neither `shield()` nor `confirm()` was called. Because this is an internal native interface rather than a supported stable SDK, the agent pins both version and SHA-256 and keeps all signing/broadcast capability disabled by default. Set `ZINGO_SHIELDING_RUNTIME_VERIFIED=1` only in local ignored `.env` after the owner has verified the actual wallet runtime; default is `0`. Do not create extra wallet accounts or build a custom Zingolib fork. Do not invent an `ironwood` RPC parameter.
 
 Zcash keys remain on the user's machine. No seed phrase/private key import into the web app or hosted backend. Bind agent and wallet RPC to loopback, authenticate local callers where practical, use strict origin/CSRF protections, and expose a minimal allowlisted API.
 

@@ -4,6 +4,8 @@ import { useAccount, useConnect, useDisconnect, useSignTypedData, useSwitchChain
 import {
   checkAgentHealth,
   checkAgentPath,
+  checkAgentShield,
+  approveAgentShield,
   createAgentPath,
   createJob,
   createQuote,
@@ -11,6 +13,9 @@ import {
   getAgentCapabilities,
   getApiHealth,
   getJob,
+  listAgentPaths,
+  openAgentWallet,
+  prepareAgentShield,
   prepareAuthorization,
   scanBalances,
   shortAddress,
@@ -18,7 +23,7 @@ import {
   toBaseUnits
 } from "./api";
 import { chainMetadata } from "./wagmi";
-import type { AgentCapabilities, AgentPath, AuthorizationEnvelope, ChainBalance, ChainKey, RescueJob, RescueLeg, ScanResult } from "./types";
+import type { AgentCapabilities, AgentPath, AgentShieldPreparation, AgentShieldStatus, AuthorizationEnvelope, ChainBalance, ChainKey, RescueJob, RescueLeg, ScanResult } from "./types";
 
 type PendingSignatures = { signature: `0x${string}`; routeSignature: `0x${string}`; expiresAt: number };
 
@@ -131,6 +136,8 @@ function App() {
   const [agentCapabilities, setAgentCapabilities] = useState<AgentCapabilities | null>(null);
   const [agentPaths, setAgentPaths] = useState<Partial<Record<ChainKey, AgentPath>>>({});
   const [agentPathStatuses, setAgentPathStatuses] = useState<Partial<Record<ChainKey, string>>>({});
+  const [agentShieldPlan, setAgentShieldPlan] = useState<AgentShieldPreparation | null>(null);
+  const [agentShieldStatus, setAgentShieldStatus] = useState<AgentShieldStatus | null>(null);
   const [allowRemoteLightwalletd, setAllowRemoteLightwalletd] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -143,6 +150,7 @@ function App() {
   const selectedAvailable = useMemo(() => (scan?.chains ?? []).filter((item) => selected.includes(item.chainKey) && item.status === "available" && BigInt(item.balanceBaseUnits) > 0n), [scan, selected]);
   const shouldPoll = Boolean(job?.legs.some((leg) => ["submitted", "source_confirmed", "converting", "under_review", "needs_review"].includes(leg.status)));
   const activeLegForConfirmation = confirmChain ? legFor(job, confirmChain) : undefined;
+  const agentShieldExpired = agentShieldPlan ? Date.parse(agentShieldPlan.expiresAt) <= nowMs : false;
 
   useEffect(() => {
     let cancelled = false;
@@ -251,18 +259,39 @@ function App() {
       if (!agentToken.trim()) throw new Error("Enter the local companion token from its terminal. It stays in this browser tab and is never sent to the hosted API.");
       const caps = await getAgentCapabilities(agentToken.trim());
       setAgentCapabilities(caps);
-      setNotice(caps.canGenerateTransparentReceiver
-        ? `Zingolib ${caps.zingoVersion} is detected. Receiver and status commands are enabled for testing; wallet behavior is not live-verified, and shielding remains unavailable.`
-        : "Local companion is reachable, but the installed wallet CLI is not the supported version. Use a Zingo PC receiver instead; no ZEC receipt or shielding is claimed.");
+      if (caps.walletOpen) {
+        const paths = await listAgentPaths(agentToken.trim());
+        const byChain = Object.fromEntries(paths.map((path) => [path.sourceChain, path])) as Partial<Record<ChainKey, AgentPath>>;
+        setAgentPaths(byChain);
+        setReceivers((current) => ({ ...current, ...Object.fromEntries(paths.map((path) => [path.sourceChain, path.address])) }));
+      }
+      setNotice(caps.walletOpen
+        ? `Zingo PC ${caps.zingoVersion ?? "runtime"} is open through the local companion. The runtime still requires owner verification before shielding can be enabled.`
+        : "The local companion is reachable. Open the existing Zingo PC wallet locally only after enabling remote lightwalletd access for this session.");
+    });
+  }
+
+  async function handleAgentOpenWallet() {
+    await runAction("agent-open-wallet", async () => {
+      if (!agentToken.trim()) throw new Error("Enter the local companion token from its terminal.");
+      if (!allowRemoteLightwalletd) throw new Error("Allow remote lightwalletd access first. It can observe this device’s IP and wallet scan queries.");
+      const caps = await openAgentWallet(agentToken.trim(), true);
+      setAgentCapabilities(caps);
+      const paths = await listAgentPaths(agentToken.trim());
+      const byChain = Object.fromEntries(paths.map((path) => [path.sourceChain, path])) as Partial<Record<ChainKey, AgentPath>>;
+      setAgentPaths(byChain);
+      setReceivers((current) => ({ ...current, ...Object.fromEntries(paths.map((path) => [path.sourceChain, path.address])) }));
+      setNotice("The existing local Recovery Vault wallet is open and syncing through lightwalletd. Zingo PC must stay closed while the companion uses it.");
     });
   }
 
   async function handleAgentPath(chain: ChainKey) {
     await runAction(`agent-path-${chain}`, async () => {
       if (!agentCapabilities?.canGenerateTransparentReceiver) {
-        throw new Error("The configured wallet layer is not verified for automatic receiver generation. Enter a public receiver generated in Zingo PC instead.");
+        throw new Error("Open the existing wallet through the local companion first. No receiver has been generated.");
       }
-      const path = await createAgentPath(agentToken.trim(), chain);
+      if (!allowRemoteLightwalletd) throw new Error("Allow remote lightwalletd access first. It can observe this device’s IP and wallet scan queries.");
+      const path = await createAgentPath(agentToken.trim(), chain, true);
       setAgentPaths((current) => ({ ...current, [chain]: path }));
       setReceivers((current) => ({ ...current, [chain]: path.address }));
       setAgentPathStatuses((current) => ({ ...current, [chain]: "Receiver created locally; incoming status not checked." }));
@@ -278,6 +307,53 @@ function App() {
       setAgentPathStatuses((current) => ({ ...current, [chain]: status.state === "received"
         ? `${formatBaseUnits(status.amountZatoshis, 8, 8)} ZEC reported by the local adapter. Verify the wallet transaction before treating it as confirmed.`
         : "No matching transparent balance reported by the local adapter. This is not a completed-sync proof." }));
+    });
+  }
+
+  async function handlePrepareAgentShield() {
+    await runAction("agent-shield-prepare", async () => {
+      if (!agentCapabilities?.canPrepareShielding) throw new Error("Shield preparation is disabled until the local owner verifies this runtime and enables the local gate.");
+      if (!allowRemoteLightwalletd) throw new Error("Allow remote lightwalletd access first. It can observe this device’s IP and wallet scan queries.");
+      const plan = await prepareAgentShield(agentToken.trim(), true);
+      setAgentShieldPlan(plan);
+      setAgentShieldStatus(null);
+      setNotice("A local account-level shield proposal is ready for review. Nothing has been signed or broadcast.");
+    });
+  }
+
+  async function handleApproveAgentShield() {
+    if (!agentShieldPlan) return;
+    if (Date.parse(agentShieldPlan.expiresAt) <= Date.now()) {
+      setAgentShieldPlan(null);
+      setError("The local shielding proposal expired. Prepare a fresh proposal after reviewing current balances.");
+      return;
+    }
+    await runAction("agent-shield-approve", async () => {
+      const result = await approveAgentShield(agentToken.trim(), agentShieldPlan, true);
+      setAgentShieldStatus({
+        preparationId: result.preparationId,
+        state: result.state,
+        txids: result.txids,
+        ironwoodConfirmed: false,
+        transparentBalanceRemainingZatoshis: null,
+        checkedAt: result.submittedAt
+      });
+      setNotice(result.state === "submitted"
+        ? "The locally approved shielding transaction was submitted. Refresh local status to verify Ironwood confirmation."
+        : "The local wallet’s broadcast result is uncertain. Do not retry automatically; check the local wallet and transaction status.");
+    });
+  }
+
+  async function handleAgentShieldStatus() {
+    const preparationId = agentShieldStatus?.preparationId ?? agentShieldPlan?.preparationId;
+    if (!preparationId) return;
+    await runAction("agent-shield-status", async () => {
+      if (!allowRemoteLightwalletd) throw new Error("Allow remote lightwalletd access first. It can observe this device’s IP and wallet scan queries.");
+      const status = await checkAgentShield(agentToken.trim(), preparationId, true);
+      setAgentShieldStatus(status);
+      setNotice(status.ironwoodConfirmed
+        ? "The local wallet reports the shielded transaction confirmed in Ironwood."
+        : `Local shielding status: ${status.state.replaceAll("_", " ")}. No completion is claimed yet.`);
     });
   }
 
@@ -523,10 +599,29 @@ function App() {
               <label className="agent-token-label" htmlFor="agent-token">Local session token</label>
               <input id="agent-token" type="password" autoComplete="off" placeholder="From the local agent terminal" value={agentToken} onChange={(event) => setAgentToken(event.target.value)} />
               <button type="button" className="button button-secondary button-wide" onClick={() => void handleAgentConnect()} disabled={Boolean(busyAction) || !agentToken.trim()}>{busyAction === "agent" ? "Checking capabilities…" : "Check wallet capabilities"}</button>
-              <label className="agent-sync-consent"><input type="checkbox" checked={allowRemoteLightwalletd} onChange={(event) => setAllowRemoteLightwalletd(event.target.checked)} /><span>Allow wallet status checks to contact the configured remote lightwalletd. It may observe this device’s IP and wallet scan queries; Zcash keys stay local. This choice lasts only for this tab.</span></label>
+              <label className="agent-sync-consent"><input type="checkbox" checked={allowRemoteLightwalletd} onChange={(event) => setAllowRemoteLightwalletd(event.target.checked)} /><span>Allow this local session to connect to the configured remote lightwalletd for wallet opening, syncing, receiver checks, and shielding status. It may observe this device’s IP and wallet scan queries; Zcash keys stay local. When using the hosted app, your browser may also ask permission to connect to this device’s local agent.</span></label>
             </>}
-            {agentCapabilities && <div className={`capability-note ${agentCapabilities.canGenerateTransparentReceiver ? "source-reviewed" : "blocked"}`}><strong>{agentCapabilities.canGenerateTransparentReceiver ? `CLI ${agentCapabilities.zingoVersion} detected` : "Not live-verified"}</strong><p>{agentCapabilities.limitations[0] ?? "Shield preparation, signing, and broadcast are disabled."}</p></div>}
-            {agentCapabilities?.canGenerateTransparentReceiver && <div className="agent-tools">{chainKeys.map((chain) => <button type="button" className="agent-path-button" key={chain} disabled={Boolean(busyAction)} onClick={() => void handleAgentPath(chain)}>{agentPaths[chain] ? `${chainMetadata[chain].name} path ready` : `Create ${chainMetadata[chain].name} receiver`}</button>)}</div>}
+            {agentCapabilities && <div className={`capability-note ${agentCapabilities.canGenerateTransparentReceiver ? "source-reviewed" : "blocked"}`}><strong>{agentCapabilities.walletOpen ? `Zingo PC ${agentCapabilities.zingoVersion ?? "runtime"} connected locally` : "Local wallet not open"}</strong><p>{agentCapabilities.limitations[0] ?? "Wallet operations are local. Review each action before continuing."}</p></div>}
+            {agentOnline && agentCapabilities && !agentCapabilities.walletOpen && <button type="button" className="button button-secondary button-wide" onClick={() => void handleAgentOpenWallet()} disabled={Boolean(busyAction) || !allowRemoteLightwalletd || !agentToken.trim()}>{busyAction === "agent-open-wallet" ? "Opening local wallet…" : "Open existing Recovery Vault wallet"}</button>}
+            {agentCapabilities?.canGenerateTransparentReceiver && <div className="agent-tools">{chainKeys.map((chain) => <button type="button" className="agent-path-button" key={chain} disabled={Boolean(busyAction) || Boolean(agentPaths[chain])} onClick={() => void handleAgentPath(chain)}>{agentPaths[chain] ? `${chainMetadata[chain].name} path ready` : `Create ${chainMetadata[chain].name} receiver`}</button>)}</div>}
+            {agentCapabilities?.canPrepareShielding && <div className="agent-shield-tools">
+              <strong>Account-level transparent → Ironwood shield</strong>
+              <p>{agentCapabilities.privacyDisclosure}</p>
+              {!agentShieldPlan && <button type="button" className="button button-secondary button-wide" onClick={() => void handlePrepareAgentShield()} disabled={Boolean(busyAction) || !allowRemoteLightwalletd}>{busyAction === "agent-shield-prepare" ? "Preparing local proposal…" : "Prepare shield proposal"}</button>}
+              {agentShieldPlan && <div className="agent-shield-review">
+                <p><strong>All registered Base and Arbitrum transparent funds are in scope.</strong> Review the inputs and fee below. Preparation has not signed or broadcast.</p>
+                {agentShieldPlan.sourceAmounts.map((row) => <div className="agent-shield-amount" key={row.sourceChain}><span>{chainMetadata[row.sourceChain].name} t1 inputs</span><strong>{formatBaseUnits(row.amountZatoshis, 8, 8)} ZEC</strong></div>)}
+                <div className="agent-shield-amount"><span>Total transparent input</span><strong>{formatBaseUnits(agentShieldPlan.totalInputZatoshis, 8, 8)} ZEC</strong></div>
+                <div className="agent-shield-amount"><span>Network fee</span><strong>{formatBaseUnits(agentShieldPlan.feeZatoshis, 8, 8)} ZEC</strong></div>
+                <div className="agent-shield-amount"><span>Expected Ironwood output</span><strong>{formatBaseUnits(agentShieldPlan.expectedIronwoodAmountZatoshis, 8, 8)} ZEC</strong></div>
+                <p className="agent-shield-disclosure">{agentShieldPlan.disclosure}</p>
+                <p className="agent-shield-expiry">Proposal expires {new Date(agentShieldPlan.expiresAt).toLocaleTimeString()}.</p>
+                {agentShieldStatus && <p className="agent-shield-expiry">Local status: {agentShieldStatus.state.replaceAll("_", " ")}{agentShieldStatus.txids.length ? ` · ${agentShieldStatus.txids.join(", ")}` : ""}</p>}
+                {(!agentShieldStatus || agentShieldStatus.state === "awaiting_approval") && !agentShieldExpired && <button type="button" className="button button-danger button-wide" onClick={() => void handleApproveAgentShield()} disabled={Boolean(busyAction) || !allowRemoteLightwalletd}>{busyAction === "agent-shield-approve" ? "Confirming locally…" : "I reviewed this · sign and broadcast locally"}</button>}
+                {agentShieldExpired && !agentShieldStatus && <button type="button" className="button button-secondary button-wide" onClick={() => { setAgentShieldPlan(null); setAgentShieldStatus(null); }} disabled={Boolean(busyAction)}>Discard expired proposal and prepare again</button>}
+                {agentShieldStatus && agentShieldStatus.state !== "confirmed" && <button type="button" className="button button-secondary button-wide" onClick={() => void handleAgentShieldStatus()} disabled={Boolean(busyAction) || !allowRemoteLightwalletd}>{busyAction === "agent-shield-status" ? "Checking local status…" : "Check local shielding status"}</button>}
+              </div>}
+            </div>}
             <p className="agent-footnote">The token stays in this tab's memory. It is sent only to the fixed loopback agent, never to the hosted API.</p>
           </section>
 

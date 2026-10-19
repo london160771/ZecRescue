@@ -8,9 +8,9 @@ import { AgentError } from "../errors.js";
 import type { ZcashWalletProvider } from "../wallet-provider.js";
 
 const receiveSchema = z.object({ sourceChain: z.enum(["base", "arbitrum"]) }).strict();
-const syncSchema = z.object({ allowRemoteLightwalletd: z.literal(true) }).strict();
-const shieldSchema = z.object({ pathId: z.string().uuid() }).strict();
-const emptySchema = z.object({}).strict();
+const consentSchema = z.object({ allowRemoteLightwalletd: z.literal(true) }).strict();
+const shieldSchema = z.object({ scope: z.literal("all_eligible_transparent"), allowRemoteLightwalletd: z.literal(true) }).strict();
+const approveShieldSchema = z.object({ confirm: z.literal(true), preparationHash: z.string().regex(/^[0-9a-f]{64}$/), allowRemoteLightwalletd: z.literal(true) }).strict();
 
 function localRequestGuard(config: AgentConfig): RequestHandler {
   return (request, response, next) => {
@@ -25,6 +25,9 @@ function localRequestGuard(config: AgentConfig): RequestHandler {
       response.setHeader("Vary", "Origin");
       response.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
       response.setHeader("Access-Control-Allow-Headers", "Authorization,Content-Type");
+      if (request.get("access-control-request-private-network")?.toLowerCase() === "true") {
+        response.setHeader("Access-Control-Allow-Private-Network", "true");
+      }
     }
     if (request.method === "OPTIONS") return response.status(204).end();
     return next();
@@ -68,39 +71,41 @@ export function createAgentApp(config: AgentConfig, provider: ZcashWalletProvide
   app.use(localRequestGuard(config));
   app.use(express.json({ limit: "8kb", strict: true }));
   app.use("/v1", rateLimit({ windowMs: 60_000, limit: 30, standardHeaders: "draft-8", legacyHeaders: false }));
-  app.use(requireAgentToken(config.accessToken));
 
   app.get("/healthz", (_request, response) => response.json({ status: "ok", network: "mainnet" }));
+  app.use(requireAgentToken(config.accessToken));
+
   app.get("/v1/capabilities", async (_request, response) => response.json(await provider.getCapabilities()));
+  app.post("/v1/wallet/open", async (request, response) => {
+    const body = parseBody(consentSchema, request.body);
+    response.json(await provider.openWallet(body.allowRemoteLightwalletd));
+  });
+  app.get("/v1/receive-paths", async (_request, response) => response.json(await provider.listReceivePaths()));
   app.post("/v1/receive-paths", async (request, response) => {
-    const body = parseBody(receiveSchema, request.body);
-    response.status(201).json(await provider.createReceivePath(body.sourceChain));
+    const body = parseBody(receiveSchema.extend({ allowRemoteLightwalletd: z.literal(true) }).strict(), request.body);
+    response.status(201).json(await provider.createReceivePath(body.sourceChain, body.allowRemoteLightwalletd));
   });
   app.post("/v1/receive-paths/:pathId/status", async (request, response) => {
     const pathId = parseBody(z.string().uuid(), request.params.pathId);
-    const body = parseBody(syncSchema, request.body);
+    const body = parseBody(consentSchema, request.body);
     response.json(await provider.getReceiveStatus(pathId, body.allowRemoteLightwalletd));
   });
 
-  // The caller may name only a locally registered path, never an arbitrary
-  // receiver. The standard CLI cannot consume its exact-address selector yet.
-  app.post("/v1/shielding/prepare", async (request, _response, next) => {
-    try {
-      const body = parseBody(shieldSchema, request.body);
-      await provider.prepareShielding(body.pathId);
-    } catch (error) {
-      next(error);
-    }
+  // Shielding is intentionally account-level. A caller cannot supply an address,
+  // destination, arbitrary wallet method, or source selector.
+  app.post("/v1/shielding/prepare", async (request, response) => {
+    const body = parseBody(shieldSchema, request.body);
+    response.status(201).json(await provider.prepareShielding(body.scope, body.allowRemoteLightwalletd));
   });
-  app.post("/v1/shielding/:preparationId/approve", (request, _response, next) => {
-    parseBody(emptySchema, request.body);
-    if (!z.string().uuid().safeParse(request.params.preparationId).success) return next(new AgentError(400, "INVALID_REQUEST"));
-    return next(new AgentError(501, "LOCAL_SHIELDING_APPROVAL_NOT_AVAILABLE"));
+  app.post("/v1/shielding/:preparationId/approve", async (request, response) => {
+    const preparationId = parseBody(z.string().uuid(), request.params.preparationId);
+    const body = parseBody(approveShieldSchema, request.body);
+    response.json(await provider.approveShielding(preparationId, body.preparationHash, body.allowRemoteLightwalletd));
   });
-  app.post("/v1/transactions/:txid/broadcast", (request, _response, next) => {
-    if (!/^0x[0-9a-fA-F]{64}$/.test(request.params.txid)) return next(new AgentError(400, "INVALID_REQUEST"));
-    parseBody(emptySchema, request.body);
-    return next(new AgentError(501, "LOCAL_BROADCAST_NOT_AVAILABLE"));
+  app.post("/v1/shielding/:preparationId/status", async (request, response) => {
+    const preparationId = parseBody(z.string().uuid(), request.params.preparationId);
+    const body = parseBody(consentSchema, request.body);
+    response.json(await provider.getShieldStatus(preparationId, body.allowRemoteLightwalletd));
   });
   app.post("/v1/withdrawals/prepare", (_request, _response, next) => next(new AgentError(501, "LOCAL_WITHDRAWAL_NOT_AVAILABLE")));
   app.use(errorHandler);

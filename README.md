@@ -8,7 +8,7 @@ ZecRescue is a non-custodial emergency rescue tool. Locked V1 scope is native Ci
 - Phase 1 implements the EVM rescue API, short-lived EIP-3009 authorization preparation, relayer submission, and MongoDB orchestration state.
 - Phase 2 implements quote acquisition, signed-quote validation, quote-bound authorization preparation, provider status tracking, and sanitized quote metadata storage.
 - Phase 2 has not been verified against a live 1Click API in this environment. Unit fixtures are not live-provider proof.
-- Phase 3 adds the loopback-only `zecrescue-agent` and a fixed-command Zingolib CLI adapter. Its generated receiver and incoming-status behavior have not been exercised with the user's wallet in this environment. A lower-level Zcash selector can filter exact source addresses, but supported Zingolib does not connect it to its private proposal/sign/transmit lifecycle and hardcodes Orchard output. A reviewed upstream change or maintained fork is required; shield/sign/broadcast/withdrawal remain disabled.
+- Phase 3 now uses a pinned Zingo PC 2.0.26 Windows x64 native addon through a loopback-only allowlisted `zecrescue-agent`. The adapter creates distinct Base/Arbitrum receivers, tracks them separately, and supports account-level shield proposal/approval/status behind local gates. The user approved account-level shielding; it may link both public inputs before Ironwood. The adapter has not opened the user's wallet or contacted lightwalletd. Signing/broadcast remain disabled by default until the user verifies the local runtime and enables the ignored `.env` gate.
 - Phase 4 combines Base and Arbitrum in one idempotent workflow with derived per-chain progress and explicit partial/failure/review states. Live RPC, provider, and wallet actions remain unverified.
 - Phase 5 adds a code-level RescueRouter and fixed, user-signed USDC reimbursement. The router is unaudited and undeployed; fixed reimbursement is not exact gas reimbursement.
 - Phase 6 provides a responsive React/Vite wallet workflow. EVM reads go through the API; signatures are requested from the user's wallet and held in tab memory until explicit relayer submission. The UI blocks unverified Zcash shielding and keeps funded validation visible.
@@ -24,7 +24,7 @@ npm run dev:web
 
 For full local operation, start the API separately and configure it with the local MongoDB URI and server-only settings described below. Vite proxies `/api` to `127.0.0.1:8787`. Production Vercel builds require the non-secret `VITE_API_BASE_URL` to point at the Render API origin. Never put RPC credentials or relayer keys in a `VITE_` variable. The browser wallet connector is used for address access and EIP-712 signing; browser EVM RPC transports intentionally reject reads, which remain server-side.
 
-The local agent is called only at the fixed loopback origin on port 4180. Its session token stays in browser memory and is sent only to loopback. Current unverified receive/shield operations remain visibly blocked; no demo state is represented as a mainnet result.
+The local agent is called only at the fixed loopback origin on port 4180. Its session token stays in browser memory and is sent only to loopback. Receiver/shield paths stay unavailable until the local wallet is opened with consent; shield preparation/signing/broadcast are separately disabled by default. No demo state is represented as a mainnet result.
 
 ## Backend development
 
@@ -39,13 +39,13 @@ The API listens on port `8787` by default. In production, set `WEB_ORIGIN` to th
 
 ## Local Zcash agent
 
-See [`agent/README.md`](agent/README.md) before configuring the local companion. It binds only to `127.0.0.1:4180`, prints an ephemeral bearer token to its terminal, and requires an existing Zingo Mainnet wallet directory. Never share the token, wallet backup, or keys. The agent does not initialize wallets, and the user must close Zingo PC before connecting the CLI to the same wallet directory.
+See [`agent/README.md`](agent/README.md) before configuring the local companion. It binds only to `127.0.0.1:4180`, prints an ephemeral bearer token to its terminal, and requires an existing Zingo Mainnet wallet directory. Never share the token, wallet backup, or keys. The agent does not initialize wallets, and the user must close Zingo PC before connecting the native companion to the same wallet directory.
 
 ```sh
 npm run dev:agent
 ```
 
-The only enabled wallet operations are receiver creation and guarded incoming-status inspection. The shield/sign/broadcast/withdrawal API paths return a blocked response; this is intentional, not a successful Zcash integration.
+The automated checks use injected wallet fakes; they do not prove the user's live Zcash wallet. The actual shield/sign/broadcast gate stays off until local runtime verification, and withdrawals remain disabled.
 
 ## Multi-chain workflow API
 

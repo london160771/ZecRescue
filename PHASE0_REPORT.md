@@ -1,6 +1,6 @@
 # ZecRescue Phase 0 Feasibility Report
 
-**Updated:** 2026-10-19
+**Updated:** 2026-10-19 (account-level shielding decision and gated local-agent prototype)
 **Decision:** **CONDITIONAL PASS**
 **V1 scope:** Base + Arbitrum. Optimism is deferred.
 **Mainnet policy:** production mainnet is the only valid EVM proof environment. No testnet result is presented as production evidence.
@@ -19,7 +19,8 @@ After Phase 6 and explicit user approval, the remaining funded validation is: Ba
 - MongoDB / Atlas remains the backend database for minimum orchestration metadata.
 - No Zebra, zecd, or full Zcash node. Zcash remains light-client based.
 - Phase 0 wallet proof candidate: Zingo PC on Windows with remote lightwalletd.
-- Final design still needs a programmable local `zecrescue-agent` and the smallest viable Zingo/Zingolib-compatible wallet layer. GUI operation is not proof of a programmatic API.
+- Phase 3 prototype uses the already-installed Zingo PC 2.0.26 Windows x64 native addon through a pinned allowlist. The addon loaded and reported its library version, but the user wallet was not opened and no wallet operation was exercised. The internal API is unsupported upstream and is not production-verified.
+- Base and Arbitrum have distinct local `t1` receivers and separate incoming tracking. The accepted V1 shielding scope is account-level and can include both chains; the product must disclose pre-shield correlation and require a dedicated wallet without unrelated transparent funds.
 - Zcash keys stay local. The user controls the Recovery Vault. ZecRescue never takes custody of rescued funds.
 - The product must never request/import/store the victim's seed phrase/private key.
 
@@ -36,7 +37,7 @@ After Phase 6 and explicit user approval, the remaining funded validation is: Ba
 | Zcash receiver generation | **USER-REPORTED PASS** | User reports transparent `t1` receiver and Ironwood-capable unified address generated locally. |
 | Incoming ZEC detection | **PENDING FUNDED VALIDATION** | No test deposit has reached the wallet. |
 | Transparent ZEC→shielded Ironwood-compatible pool | **PENDING FUNDED VALIDATION** | No funded shielding transaction. Do not claim funds are shielded. |
-| Programmable local `zecrescue-agent` | **CODE-LEVEL PARTIAL; NOT LIVE VERIFIED** | Loopback agent has a source-reviewed Zingolib CLI adapter. Receiver/status commands require exact `zingolib_v6.0.0` output; no CLI is configured against the user's wallet and no live command/sync was run. Shielding/signing/broadcast remain disabled. |
+| Programmable local `zecrescue-agent` | **CODE-LEVEL PROTOTYPE; WALLET NOT LIVE VERIFIED** | Loopback agent pins installed Zingo PC 2.0.26 native addon by version/hash, uses a fixed method allowlist, and has injected fake-runtime tests for paths, status, shield preparation/approval, and Ironwood status. No wallet open/sync/shield call was made. Shielding stays disabled by default pending owner runtime verification. |
 | NEAR refund | **DOCUMENTATION + QUOTE CONFIG ONLY** | Quote selected `refundType: ORIGIN_CHAIN` and the user's clean Base EOA. No refund was triggered or observed. |
 | Production gas reimbursement | **NOT MAINNET PROVEN** | Phase 5 now has a code-level, locally tested route-bound router that pays a fixed user-signed USDC amount and forwards the remainder atomically. No contract is deployed. The signed reimbursement is not computed from actual gas; Base L1/data-fee accounting and production calibration remain blockers. |
 
@@ -87,12 +88,14 @@ Arbitrum had an earlier 10-USDC dry quote only. A funded Base or Arbitrum conver
 - Measured `%APPDATA%\Zingo PC` after user-reported sync: **2,366,276 bytes (2.26 MiB; 51 files)**.
 - Combined measured install + app-data: **505,587,228 bytes (482.17 MiB)**; current C: free space reported at measurement: **11.04 GB**.
 - This is a folder-level measurement. Wallet files were not opened; no secret material was requested or handled.
-- These are user-reported wallet/UI proofs, not incoming ZEC or transaction proofs. Zingo PC is not known to provide a stable agent API. The current code has a source-reviewed CLI adapter, but its runtime and wallet compatibility remain unverified.
+- These are user-reported wallet/UI proofs, not incoming ZEC or transaction proofs. The installed Zingo PC runtime is 2.0.26 (Windows x64; app source package reports Zingolib `zl_6.0.0_6d43e`). The local native addon loads in Node 22.20.0 and reported that version. The agent adapter has not opened the user's wallet or performed remote sync.
 - The local agent must bind to loopback, control only the local light-wallet layer, keep keys local, and return only public receiver/status data. It must not act as an arbitrary RPC proxy.
 - Ironwood may be exposed under Orchard/generic wallet API terminology. Use observed API semantics; do not invent an `ironwood` RPC argument.
 - Incoming transparent ZEC, monitoring, transaction preparation, local signing/broadcast, and shielding remain pending funded validation.
 
-### Phase 3 local-agent investigation (2026-10-19)
+### Historical Phase 3 CLI investigation (2026-10-19; superseded)
+
+The following CLI and source-isolation notes preserve the earlier investigation only. They are not the current V1 implementation decision; the account-level design and pinned Zingo PC native adapter below supersede them.
 
 **DOCUMENTATION ONLY:** The current upstream Zingolib repository contains a `zingo-cli` binary intended for one-shot wallet commands. Its README documents `--data-dir`, one-shot command mode, `--online --waitsync`, and automatic wallet creation when a directory has no wallet. The command source implements `new_taddress`, `coins`, and `notes` output. The adapter must therefore point only to an existing non-empty `zingo-wallet.dat`; it never supplies a seed, view key, or arbitrary command. Code now checks CLI `version` output and enables receiver/status calls only for exactly `zingolib_v6.0.0`. This source-derived compatibility gate does not verify the installed binary or prove commands work with the user's wallet.
 
@@ -100,20 +103,35 @@ Arbitrum had an earlier 10-USDC dry quote only. A funded Base or Arbitrum conver
 
 Primary sources: [Zingolib v6.0.0 release](https://github.com/zingolabs/zingolib/releases/tag/zingolib_v6.0.0), [v6.0.0 CLI command source](https://raw.githubusercontent.com/zingolabs/zingolib/zingolib_v6.0.0/zingo-cli/src/commands.rs), [Zingolib UTXO selection notes](https://github.com/zingolabs/zingolib#note-management), [Zingo PC](https://github.com/zingolabs/zingo-pc), [Ironwood pool concepts](https://zcash.github.io/ironwood/concepts.html).
 
-**CODE-LEVEL ONLY:** Added `zecrescue-agent`, bound to `127.0.0.1`, with a random local bearer token, exact browser origin allowlist, strict request schemas, request-size/rate limits, and fixed Zingolib CLI commands. It refuses to initialize a wallet and never accepts or forwards key material. The public local API is `GET /healthz`, `GET /v1/capabilities`, `POST /v1/receive-paths`, and `POST /v1/receive-paths/:pathId/status` with explicit remote-lightwalletd consent. A git-ignored local manifest persists only the path ID, chain label, and public receiver. Remote lightwalletd may observe the user's IP and wallet scan queries; the browser requires an explicit opt-in before sync. Receiver/status commands fail closed unless the CLI reports exact v6.0.0; capability state remains `source_review_only`. Ironwood receiver claims, shielding, signing, broadcast, and withdrawals are disabled until those paths are independently verified and per-chain input isolation is solved.
+**HISTORICAL CODE-LEVEL ONLY:** The earlier CLI agent used a random local bearer token, exact origin allowlist, strict request schemas, and a git-ignored public receiver manifest. That adapter was replaced by the pinned Zingo PC native adapter described below. The old source-isolation gating rationale is superseded by the owner's account-level shielding decision.
 
-**NOT TESTED LIVE:** No `zingo-cli` executable or wallet directory was configured; the user's Zingo PC data was not opened, copied, or modified. No live receiver was generated by the agent, no sync/detection was invoked, and no ZEC moved. Agent tests use synthetic receiver/CLI output fixtures and demonstrate input/output validation only; they are not Zcash integration proof.
+**NOT TESTED LIVE:** No local wallet directory was configured for the agent; the user's Zingo PC wallet data was not opened, copied, or modified. No live receiver was generated by the agent, no sync/detection was invoked, and no ZEC moved. Agent tests use a fake native API and demonstrate local adapter/orchestration behavior only; they are not Zcash integration proof.
 
-**Current local-agent blockers:**
-
-1. Obtain a reviewed Zingolib upstream API change or maintained fork that exposes exact-address selection and Ironwood output through the normal proposal/sign/transmit lifecycle; the stock CLI alone is insufficient.
-2. Independently verify the CLI coin-summary schema and sync-complete signal before treating a status response as incoming-ZEC evidence.
-3. With the bridge implemented, return and audit selected proposal input addresses; refuse unless every selected input equals the active path's exact receiver.
-4. Only after source isolation is available, prove local user approval, signing, broadcast, and Ironwood confirmation with the user's wallet.
+**Historical blocker status:** Exact source isolation is no longer a V1 requirement by product decision. A custom fork is explicitly not planned. The current remaining blocker is local wallet/runtime verification and funded post-Phase-6 validation.
 
 Sources: [Zingolib repository](https://github.com/zingolabs/zingolib), [Zingolib CLI README](https://github.com/zingolabs/zingolib/blob/dev/zingo-cli/README.md), [CLI command implementation](https://github.com/zingolabs/zingolib/blob/dev/zingo-cli/src/commands.rs), and [shield proposal implementation](https://github.com/zingolabs/zingolib/blob/dev/zingolib/src/wallet/propose.rs).
 
-### Source-isolated shielding architecture review (2026-10-19)
+### Owner decision and pinned Zingo PC native adapter — 2026-10-19
+
+**PRODUCT DECISION:** Keep unique Base and Arbitrum `t1` receivers and track their incoming amounts independently. V1 does not require source-isolated shield transactions. A dedicated user-controlled Recovery Vault may shield all eligible transparent inputs at account level. Base and Arbitrum can remain publicly linkable before shielding; the UI must disclose this. Require a dedicated wallet with no unrelated transparent funds. Privacy starts only after local confirmation that the received transaction reached Ironwood. Do not create additional wallets/accounts or build a custom Zingolib fork.
+
+**PROVEN READ-ONLY — installed runtime:** The already-installed Zingo PC 2.0.26 Windows x64 native addon was loaded under Node 22.20.0 without opening a wallet. `get_version()` returned `zl_6.0.0_6d43e`. The addon SHA-256 is pinned in the agent source. The binary exposes many unrelated sensitive methods, including seed/view-key operations and generic send, so the agent accepts a strict fixed allowlist and never exports the raw addon. This is an internal Zingo PC interface, not a stable supported SDK; upgrades require a fresh review and hash/version change.
+
+**PROVEN READ-ONLY — proposal/submit split and Ironwood terminology:** The installed app's bundled source map and the Zingo PC source document a two-step operation: `shield()` prepares and returns fee/error information; `confirm()` performs the submission and returns transaction IDs. Zingo PC describes transparent shielding as one-click shielding into the current shielded receiver/Ironwood path under Mainnet NU6.3. The app's older wrapper can still name the method `shieldTransparentBalanceToOrchard`; follow its actual current routing behavior, not an invented `ironwood` selector. Source code establishes interface behavior only; no proposal or transaction was created here. [Zingo PC release 2.0.26](https://github.com/zingolabs/zingo-pc/releases/tag/zingo-pc-2.0.26-189), [Zingo PC wallet documentation](https://github.com/zingolabs/zingo-pc), [Zingo PC RPC source](https://github.com/zingolabs/zingo-pc/blob/dev/src/rpc/rpc.ts).
+
+**CODE-LEVEL PROTOTYPE:** Added a Windows x64 native adapter with version/hash pinning, capability and wallet-open checks, existing-wallet-only behavior, explicit remote-lightwalletd consent, fresh per-chain transparent receiver generation, local path manifest, per-receiver spendable balance checks, account-level shield proposal, two-minute proposal expiry, explicit hash-bound local approval, single broadcast attempt, and Ironwood status polling. Shield preparation/signing/broadcast require both `ZINGO_RECOVERY_WALLET_DEDICATED=1` and `ZINGO_SHIELDING_RUNTIME_VERIFIED=1`; both default off in `.env.example`. The web app shows Base/Arbitrum amounts, account total, fee, expected shielded amount, proposal expiry, and privacy disclosure before approval. MongoDB receives no receiver-to-vault identity or wallet data.
+
+**SECURITY / PRIVACY LIMITS:** The internal native API is unsupported upstream and may change. `ZINGO_SHIELDING_RUNTIME_VERIFIED` is a local owner acknowledgement, not proof generated by tests. The adapter uses a configured existing wallet and refuses read-only wallet kinds; it never creates/imports a wallet. Only agent-created receiver paths can be used; there is no HTTP route to register arbitrary addresses or override the path's source chain. Any unassigned spendable transparent balance blocks preparation. A mixed account shield can consolidate Base and Arbitrum source trails; the user must understand this before approval. No seed phrase, spending/viewing key, wallet backup, or local wallet path is sent to MongoDB or hosted API.
+
+**DISK / RAM:** No new runtime/tooling was installed or compiled for this adapter. The pre-existing Zingo PC installation measured 479.91 MiB and prior synced app-data measured 2.26 MiB (482.17 MiB combined); no wallet was opened during this task. The adapter adds only TypeScript files and negligible local manifest data. No reliable RAM measurement is available because the wallet was not opened.
+
+**NOT TESTED LIVE / MANUAL PREREQUISITE:** No Zingo wallet file was opened, no lightwalletd sync was started, no receiver was generated by the agent, no incoming ZEC was detected, and no shield proposal, signature, broadcast, or transaction was made. The runtime interface, wallet schema, remote sync behavior, status pool naming, and Ironwood transaction confirmation remain unverified against the user's actual wallet. The owner must configure the existing local wallet path/name/lightwalletd URI in ignored `.env` and close Zingo PC before local agent access. Never share recovery words or keys.
+
+**VERIFICATION SCOPE:** Automated tests inject a fake native API and prove only the agent boundary and orchestration logic. They do not prove the Zcash runtime or mainnet shield path. Full Base/Arbitrum funded conversion, ZEC detection, shielding, and final end-to-end proof remain pending after Phase 6 and explicit user approval.
+
+### Historical source-isolation investigation (2026-10-19; superseded by the product decision above)
+
+The source-isolation requirement below was removed from V1. It records the earlier investigation only and is not the current architecture or a Phase 3 blocker. V1 permits a dedicated Recovery Vault to shield eligible Base and Arbitrum transparent inputs together, with the correlation disclosure stated above.
 
 **PROVEN READ-ONLY — selector capability:** The official Zingolib v6.0.0 and v7.0.0 `LightWallet::create_shield_proposal` implementation enumerates every transparent address in the wallet and supplies that entire vector to the Zcash shielding proposal. The stock `zingo-cli shield` calls `propose_shield(AccountId::ZERO)` and returns only shield amount and fee; it neither accepts a source-address parameter nor exposes selected input addresses. Therefore, the stock shield command is unsafe for independent Base/Arbitrum inputs and remains prohibited. Creating separate Zingo ZIP-32 accounts alone does not fix the stock command because it still enumerates all stored transparent addresses.
 
@@ -157,7 +175,7 @@ Until those funded steps complete, the project is **CONDITIONAL PASS / PENDING F
 
 ## Implementation and phase-acceptance status
 
-Phase 1, Phase 2, and Phase 4–6 implementation code and local verification are present, but **Phases 1–6 are not yet an accepted complete delivery** because Phase 3 remains partial: no local Zingolib CLI has been tested with the user's wallet, and the current documented CLI cannot isolate transparent inputs by source receiver. The Phase 6 frontend is a real API-driven workflow, but it does not replace this missing local wallet capability. No mainnet signature, broadcast, contract deployment, provider deposit, or Zcash transaction was performed as part of the code implementation. The funded Base/Arbitrum conversion, ZEC receipt detection, Ironwood-compatible shielding, and end-to-end checks remain **PENDING FINAL PHASE 0 FUNDED VALIDATION** and require explicit user approval after Phase 6 passes. Production relayer use also remains blocked by the undeployed/unaudited router and uncalibrated fixed-USDC reimbursement policy; Zcash shield/sign/broadcast remains disabled until a source-isolated local light-wallet integration is proven.
+Phase 1, Phase 2, and Phase 4–6 implementation code and local verification are present, but **Phases 1–6 are not yet an accepted complete delivery** because Phase 3 still needs owner-controlled wallet/runtime verification. The new local adapter has only fake-native automated tests; no local wallet was opened or synced. No mainnet signature, broadcast, contract deployment, provider deposit, or Zcash transaction was performed as part of this code implementation. The funded Base/Arbitrum conversion, ZEC receipt detection, Ironwood-compatible shielding, and end-to-end checks remain **PENDING FINAL PHASE 0 FUNDED VALIDATION** and require explicit user approval after Phase 6 passes. Production relayer use also remains blocked by the undeployed/unaudited router and uncalibrated fixed-USDC reimbursement policy. Shield signing/broadcast is disabled by default pending local runtime verification and the separate funded-validation approval.
 
 ## Sources
 
