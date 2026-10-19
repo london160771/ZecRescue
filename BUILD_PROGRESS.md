@@ -1,6 +1,6 @@
 # ZecRescue build progress
 
-**Current phase:** Phase 4–6 integration review; Phase 3 code implementation is complete, while local-wallet runtime validation and funded end-to-end proof remain pending
+**Current phase:** Waiting for local wallet runtime verification; Phase 3 code is complete and Phases 4–6 code review/build checks are complete, while live integration and funded end-to-end proof remain pending
 **Locked product scope:** Base + Arbitrum, native Circle USDC. Optimism deferred.
 **Safety gate:** No real-money signing, broadcasting, deployments, or funded tests during Phases 1–6 without explicit user approval.
 
@@ -9,8 +9,8 @@
 - **Status:** Code implementation complete; local wallet/runtime verification and funded validation pending. The prior source-isolation blocker is resolved by the owner's V1 account-level shielding decision, not by a new selector or fork.
 - **Architecture:** One existing dedicated Zingo PC light wallet, distinct Base/Arbitrum `t1` receivers tracked locally, account-level shielding of all eligible transparent balances, an explicit pre-shield correlation disclosure, and no claim of privacy until confirmed Ironwood status. No extra account, wallet, Zebra, or full node.
 - **Completion boundary:** The Windows-only adapter supports existing-wallet open, receiver creation, local per-path monitoring, shield proposal, separate user approval/confirm, and conservative Ironwood status reporting. Native version/hash, CLI-to-native schemas, wallet open/sync, and status/pool labels still require owner-side runtime verification. Signing/broadcast remain disabled by default.
-- **Manual action:** Set the existing wallet directory/name and lightwalletd URI in ignored `.env`; close Zingo PC; start the local agent and explicitly open/sync through the UI. Do not share keys or recovery words. Keep `ZINGO_SHIELDING_RUNTIME_VERIFIED=0` until the live local runtime behavior is reviewed.
-- **Commit:** Pending.
+- **Manual action:** The local `.env` is absent. Configure the existing wallet directory/name and lightwalletd URI in a new ignored `.env`, close Zingo PC, then explicitly open/sync through the local agent. Do not share keys or recovery words. Keep `ZINGO_RECOVERY_WALLET_DEDICATED=0` and `ZINGO_SHIELDING_RUNTIME_VERIFIED=0` until the dedicated-wallet condition and local runtime behavior, particularly pool/status fields, have been verified.
+- **Commit:** `f1e727513849f0d0303c80d1b29c604660e069b6` (`feat: add gated Zingo PC recovery agent`), pushed to `origin/main`.
 
 ## Phase 4–6 integration review — 2026-10-19
 
@@ -19,7 +19,7 @@
 - **Browser integration:** Hosted HTTPS use may require the browser's Local Network Access permission for loopback. The UI now explains the prompt, and the agent allows private-network preflight only for configured origins. Browser permission behavior still requires a manual check in the deployed frontend.
 - **Major review checkpoint:** Reviewed agent route and method allowlists, origin/Host/token gates, loopback binding, explicit lightwalletd consent, no wallet creation/import or secret endpoints, source/path binding, reconciliation of all transparent balances before proposal, short-lived hash-bound approval, single confirm attempt, no automatic retry after uncertain broadcast, and Ironwood-only success classification. Fake-native tests do not establish runtime safety; the owner runtime gate remains off. No real funds, keys, wallet, signature, or transaction were accessed.
 - **Verification:** `npm test` — 64 passed (14 files); `npm run test:contracts` — 6 passed; `npm run typecheck`, `npm run lint`, `npm run build:agent`, `npm run build:api`, `npm run build:web`, and `npm run build:contracts` passed. `git diff --check` passed. `.env` is ignored, absent locally, and not tracked; high-confidence secret/signature scans found no credentials in tracked or non-ignored untracked files. `.env.example` contains reviewed safe placeholders only.
-- **Commit:** Pending.
+- **Commit:** Phase 3 implementation commit `f1e727513849f0d0303c80d1b29c604660e069b6`; pushed to `origin/main`.
 
 ## Current Phase 3 update — 2026-10-19 (supersedes earlier source-isolation blocker)
 
@@ -31,8 +31,8 @@
 - **Privacy/security review:** The raw addon is never exposed; sensitive native methods are not in the allowlist. The wallet stays local, no keys or wallet path enter MongoDB, remote lightwalletd use is consented, unassigned transparent balances block shield preparation, and an unknown status cannot become success. The local runtime gate is intentionally separate from automated tests.
 - **Verification:** `npm test` — 62 passed (14 files); `npm run typecheck`, `npm run lint`, `npm run build:agent`, `npm run build:api`, and `npm run build:web` passed; `git diff --check` passed. Fake-native tests prove only local adapter boundary behavior, not wallet compatibility or a Mainnet transaction.
 - **Security/privacy review:** Raw addon methods and key material are never exposed over HTTP; the agent binds to IPv4 loopback, checks Host/origin and bearer token, uses strict request schemas, and persists only public receiver IDs/chain labels/address values locally. It does not start wallet sync at process startup. Wallet access and status/sync require explicit consent. Account-level shielding requires an existing wallet, dedicated-wallet acknowledgement, runtime gate, reconciliation of every transparent balance, displayed fee/output/disclosure, and separate hash-bound user approval. One confirm attempt is made; uncertain broadcast results are not retried. The adapter accepts only exact Ironwood status labels, so legacy Orchard wording remains pending rather than being reported as proof.
-- **Unresolved/manual action:** Owner configures the existing wallet folder/name and lightwalletd endpoint in ignored `.env`, closes Zingo PC, and explicitly opens it through the local agent to verify compatibility and sync. Keep the shielding gate disabled until local runtime behavior, particularly status/pool fields, has been confirmed. Funded receive-to-Ironwood validation remains after Phase 6 and requires explicit approval.
-- **Commit:** Pending final integration review and commit.
+- **Unresolved/manual action:** Owner configures the existing wallet folder/name and lightwalletd endpoint in ignored `.env`, closes Zingo PC, and explicitly opens it through the local agent to verify compatibility and sync. Keep both wallet acknowledgement and shielding gates at `0` until wallet dedication and local runtime behavior, particularly status/pool fields, have been confirmed. Funded receive-to-Ironwood validation remains after Phase 6 and requires explicit approval.
+- **Commit:** `f1e727513849f0d0303c80d1b29c604660e069b6`, pushed to `origin/main`.
 
 Earlier sections below are historical phase records. Any references to required source-isolated shielding, the CLI adapter as the current design, or a required custom fork are superseded by this update.
 
