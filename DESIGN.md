@@ -46,6 +46,7 @@ Node.js, Express, TypeScript, viem, MongoDB Atlas.
 - Relayer service submits only valid authorizations, checks balance/gas, records tx, waits for finality policy, and is idempotent.
 - Quote service talks to NEAR Intents server-side, validates asset IDs, expiry, Zcash receiver and refund fields, and exposes only sanitized quote data.
 - Orchestrator drives independent chain legs and provider/local-wallet status with bounded retries.
+- `POST /api/v1/workflows` creates both V1 legs under one idempotency key; `GET /api/v1/workflows/:jobId` reconciles both legs and derives overall progress without storing a separate aggregate state.
 - Mongo repository enforces schema allowlists, retention/TTL, state transitions, and duplicate idempotency.
 
 Secrets are server-side configuration only. The service must degrade safely if RPC, database, provider, or relayer configuration is missing.
@@ -80,7 +81,7 @@ The agent owns the only interface to the local light wallet. Implemented allowli
 - `GET /v1/receive-paths/:pathId/status` to inspect only that local receiver's incoming amount after light-client sync;
 - `POST /v1/shielding/prepare`, local approval, exact transaction broadcast, and withdrawal preparation routes exist as explicit `501` blockers.
 
-The service requires a random local bearer token, exact browser-origin allowlist, valid loopback host, strict schemas, request-size limits, and a fixed CLI command allowlist. It never accepts arbitrary JSON-RPC or key material. The token remains in the local browser session and is never sent to the hosted API. The path ID to receiver association is process-memory only. The local service uses the existing wallet only when `zingo-wallet.dat` is present, and refuses to initialize a wallet. The user must close Zingo PC before opening the same wallet directory through CLI to avoid concurrent writers.
+The service requires a random local bearer token, exact browser-origin allowlist, valid loopback host, strict schemas, request-size limits, and a fixed CLI command allowlist. It never accepts arbitrary JSON-RPC or key material. The token remains in the local browser session and is never sent to the hosted API. A local git-ignored manifest stores only the path ID, source-chain label, and public receive address so monitoring survives restart; it contains no EVM address or key material. The local service uses the existing wallet only when `zingo-wallet.dat` is present, and refuses to initialize a wallet. The user must close Zingo PC before opening the same wallet directory through CLI to avoid concurrent writers.
 
 The current Zingolib command output schema and installed-wallet compatibility have not been proven live. More importantly, public CLI help describes quick shielding into Ironwood, while the current source's shield proposal hardcodes the Orchard selector and consumes eligible transparent wallet outputs without selecting a source path. Therefore generate/monitor code is conservative and signing, shielding, broadcast, and withdrawal stay disabled until a per-source, Ironwood-targeted operation is verified. A status error or unknown schema must never be rendered as “no funds received.”
 
@@ -118,6 +119,8 @@ discovered → quote_ready → awaiting_authorization → authorized
 ```
 
 Terminal/recovery states include `failed`, `refunded`, `expired`, and `needs_review`. Provider and local wallet states remain separately represented. Retries require an idempotency key and fresh checks. Never resubmit a consumed EIP-3009 nonce. Never let one failed leg roll back or suppress another successful leg.
+
+The workflow summary is calculated from independent leg statuses. It may report `partial_success`, but it cannot infer local ZEC receipt or shielding from NEAR status; those remain unverified until the local wallet layer confirms them.
 
 ## 10. Gas, minimums, and safety
 

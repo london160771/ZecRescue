@@ -92,4 +92,32 @@ describe("ZingoCliWalletProvider", () => {
     const path = await provider.createReceivePath("arbitrum");
     await expect(provider.getReceiveStatus(path.pathId)).rejects.toMatchObject({ code: "ZINGO_RESPONSE_UNSUPPORTED" });
   });
+
+  it("persists only the local chain-to-receiver path so monitoring survives agent restart", async () => {
+    const { cliPath, dataDir } = await existingWalletFixture();
+    const creatorRunner = vi.fn(async (_file: string, args: readonly string[]) => {
+      void _file;
+      return { stdout: args.at(-1) === "new_taddress" ? JSON.stringify({ encoded_address: validT1 }) : "{}", stderr: "" };
+    });
+    const creator = new ZingoCliWalletProvider(cliPath, dataDir, creatorRunner as never);
+    const path = await creator.createReceivePath("base");
+
+    const monitorRunner = vi.fn(async (_file: string, args: readonly string[]) => {
+      void _file;
+      return {
+        stdout: args.at(-1) === "coins"
+          ? JSON.stringify({ transparent_coins: [{ address: validT1, value: "42" }] })
+          : "{}",
+        stderr: ""
+      };
+    });
+    const restartedProvider = new ZingoCliWalletProvider(cliPath, dataDir, monitorRunner as never);
+    const status = await restartedProvider.getReceiveStatus(path.pathId);
+    expect(status).toMatchObject({ state: "received", amountZatoshis: "42" });
+    expect(monitorRunner).toHaveBeenCalledWith(
+      cliPath,
+      ["--chain", "mainnet", "--data-dir", dataDir, "--online", "--waitsync", "coins"],
+      expect.any(Object)
+    );
+  });
 });

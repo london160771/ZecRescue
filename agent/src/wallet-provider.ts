@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { isMainnetTransparentP2pkhAddress } from "../../server/src/domain/zcash-address.js";
@@ -8,6 +8,7 @@ import { AgentError } from "./errors.js";
 
 const execFile = promisify(execFileCallback);
 const walletFileName = "zingo-wallet.dat";
+const pathRegistryFileName = ".zecrescue-agent-paths.json";
 const commandTimeoutMs = 120_000;
 const maxBufferBytes = 1024 * 1024;
 
@@ -59,6 +60,7 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
   private readonly paths = new Map<string, ReceivePath>();
   private operationTail: Promise<void> = Promise.resolve();
   private resolvedWalletPromise?: Promise<ConfiguredWallet>;
+  private pathRegistryPromise?: Promise<void>;
 
   constructor(
     private readonly configuredCliPath?: string,
@@ -85,7 +87,8 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
     }
 
     try {
-      await this.getConfiguredWallet();
+      const wallet = await this.getConfiguredWallet();
+      await this.loadPathRegistry(wallet.dataDir);
       return {
         network: "mainnet",
         walletLayer: "zingo_cli",
@@ -129,6 +132,10 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
       if (!isMainnetTransparentP2pkhAddress(address)) {
         throw new AgentError(503, "WALLET_RETURNED_INVALID_MAINNET_RECEIVER");
       }
+      await this.loadPathRegistry(wallet.dataDir);
+      if ([...this.paths.values()].some((existing) => existing.address === address)) {
+        throw new AgentError(503, "WALLET_REUSED_TRANSPARENT_RECEIVER");
+      }
       const path: ReceivePath = {
         pathId: randomUUID(),
         sourceChain,
@@ -137,15 +144,22 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
         generatedAt: new Date().toISOString()
       };
       this.paths.set(path.pathId, path);
+      try {
+        await this.savePathRegistry(wallet.dataDir);
+      } catch {
+        this.paths.delete(path.pathId);
+        throw new AgentError(503, "LOCAL_RECEIVE_PATH_PERSIST_FAILED");
+      }
       return path;
     });
   }
 
   async getReceiveStatus(pathId: string): Promise<ReceiveStatus> {
-    const path = this.paths.get(pathId);
-    if (!path) throw new AgentError(404, "RECEIVE_PATH_NOT_FOUND");
     return this.serialized(async () => {
       const wallet = await this.getConfiguredWallet();
+      await this.loadPathRegistry(wallet.dataDir);
+      const path = this.paths.get(pathId);
+      if (!path) throw new AgentError(404, "RECEIVE_PATH_NOT_FOUND");
       const output = await this.invoke(wallet, ["--online", "--waitsync", "coins"]);
       const amountZatoshis = sumTransparentAddressBalance(output, path.address);
       return {
@@ -181,6 +195,51 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
     return { cliPath, dataDir };
   }
 
+  private async loadPathRegistry(dataDir: string): Promise<void> {
+    this.pathRegistryPromise ??= this.readPathRegistry(dataDir);
+    await this.pathRegistryPromise;
+  }
+
+  private async readPathRegistry(dataDir: string): Promise<void> {
+    const registryPath = `${dataDir}/${pathRegistryFileName}`;
+    try {
+      const registryStat = await lstat(registryPath);
+      if (!registryStat.isFile() || registryStat.isSymbolicLink() || registryStat.size > 256 * 1024) {
+        throw new AgentError(503, "LOCAL_PATH_REGISTRY_INVALID");
+      }
+      const parsed: unknown = JSON.parse(await readFile(registryPath, "utf8"));
+      if (!Array.isArray(parsed)) throw new AgentError(503, "LOCAL_PATH_REGISTRY_INVALID");
+      for (const item of parsed) {
+        if (!isReceivePath(item)) throw new AgentError(503, "LOCAL_PATH_REGISTRY_INVALID");
+        this.paths.set(item.pathId, item);
+      }
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return;
+      if (error instanceof AgentError) throw error;
+      throw new AgentError(503, "LOCAL_PATH_REGISTRY_INVALID");
+    }
+  }
+
+  private async savePathRegistry(dataDir: string): Promise<void> {
+    const registryPath = `${dataDir}/${pathRegistryFileName}`;
+    const temporaryPath = `${registryPath}.${randomUUID()}.tmp`;
+    try {
+      const existing = await lstat(registryPath).catch((error: unknown) => {
+        if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return undefined;
+        throw error;
+      });
+      if (existing && (!existing.isFile() || existing.isSymbolicLink())) {
+        throw new AgentError(503, "LOCAL_PATH_REGISTRY_INVALID");
+      }
+      await writeFile(temporaryPath, JSON.stringify([...this.paths.values()]), { encoding: "utf8", flag: "wx", mode: 0o600 });
+      await rename(temporaryPath, registryPath);
+    } catch (error) {
+      await rm(temporaryPath, { force: true }).catch(() => undefined);
+      if (error instanceof AgentError) throw error;
+      throw new AgentError(503, "LOCAL_PATH_REGISTRY_WRITE_FAILED");
+    }
+  }
+
   private async invoke(wallet: ConfiguredWallet, command: string[]): Promise<Record<string, unknown>> {
     try {
       const { stdout } = await this.runCommand(
@@ -211,6 +270,16 @@ export class ZingoCliWalletProvider implements ZcashWalletProvider {
       release();
     }
   }
+}
+
+function isReceivePath(value: unknown): value is ReceivePath {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  return typeof item.pathId === "string" && /^[0-9a-f-]{36}$/i.test(item.pathId) &&
+    (item.sourceChain === "base" || item.sourceChain === "arbitrum") &&
+    typeof item.address === "string" && isMainnetTransparentP2pkhAddress(item.address) &&
+    item.receiverType === "transparent_p2pkh" && typeof item.generatedAt === "string" &&
+    Number.isFinite(Date.parse(item.generatedAt));
 }
 
 function safeChildEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -247,7 +316,9 @@ function sumTransparentAddressBalance(object: Record<string, unknown>, address: 
     const item = row as Record<string, unknown>;
     if (item.address !== address) continue;
     const value = item.value;
-    if (typeof value !== "string" && typeof value !== "number") throw new AgentError(503, "ZINGO_RESPONSE_UNSUPPORTED");
+    if (typeof value !== "string" && !(typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) {
+      throw new AgentError(503, "ZINGO_RESPONSE_UNSUPPORTED");
+    }
     const amount = String(value);
     if (!/^\d+$/.test(amount)) throw new AgentError(503, "ZINGO_RESPONSE_UNSUPPORTED");
     total += BigInt(amount);

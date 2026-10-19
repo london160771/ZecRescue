@@ -25,7 +25,7 @@ Web app → loopback-only zecrescue-agent
         → remote lightwalletd
 ```
 
-The repository now contains a loopback-only `zecrescue-agent` with a fixed-command Zingolib CLI adapter. It requires an existing `zingo-wallet.dat`, refuses to initialize a wallet, and keeps the path-to-chain association in memory. The user must close Zingo PC before the CLI uses the same directory. No live wallet connection was tested by this code change.
+The repository now contains a loopback-only `zecrescue-agent` with a fixed-command Zingolib CLI adapter. It requires an existing `zingo-wallet.dat`, refuses to initialize a wallet, and keeps the path-to-chain association in a local git-ignored manifest with no EVM address. The user must close Zingo PC before the CLI uses the same directory. No live wallet connection was tested by this code change.
 
 Receiver generation and incoming status are available only when configured; the CLI response schema and installed-wallet compatibility remain unverified. The current public CLI documentation says quickshield targets Ironwood, but its current shield implementation source still uses an Orchard selector and consumes eligible transparent account outputs without selecting an individual source path. The agent therefore disables shield preparation, local signing, broadcast, Ironwood receiver claims, and withdrawals. Do not mark these operations complete until a wallet-layer build proves separate Base/Arbitrum inputs and the exact Ironwood destination. Never proxy arbitrary wallet RPC to a hosted server.
 

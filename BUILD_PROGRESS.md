@@ -1,6 +1,6 @@
 # ZecRescue build progress
 
-**Current phase:** Phase 4 — Multi-chain orchestration
+**Current phase:** Phase 5 — Production hardening
 **Locked product scope:** Base + Arbitrum, native Circle USDC. Optimism deferred.
 **Safety gate:** No real-money signing, broadcasting, deployments, or funded tests during Phases 1–6 without explicit user approval.
 
@@ -38,7 +38,7 @@
 
 **Status:** Code-level agent implementation complete with explicit capability blockers; live wallet integration and shielding remain unproven.
 
-- **Implementation:** Added a loopback-only `zecrescue-agent` with a random 256-bit pairing token, exact configured origin allowlist, loopback Host validation, bearer auth, strict JSON schemas, 8 KB body cap, rate limits, and fixed Zingolib CLI command invocation without a shell. Agent requires an existing non-empty `zingo-wallet.dat`, only uses Mainnet arguments, serializes wallet subprocess operations, strips `ZINGO_SEED`/unrelated environment values, and keeps receiver-to-chain path IDs in memory only. Implemented local transparent receive-path creation and exact-path coin inspection; no seed/key input or arbitrary RPC/command proxy exists.
+- **Implementation:** Added a loopback-only `zecrescue-agent` with a random 256-bit pairing token, exact configured origin allowlist, loopback Host validation, bearer auth, strict JSON schemas, 8 KB body cap, rate limits, and fixed Zingolib CLI command invocation without a shell. Agent requires an existing non-empty `zingo-wallet.dat`, only uses Mainnet arguments, serializes wallet subprocess operations, strips `ZINGO_SEED`/unrelated environment values, and keeps the path ID/chain/public receiver in a local git-ignored manifest. Implemented local transparent receive-path creation and exact-path coin inspection; no seed/key input or arbitrary RPC/command proxy exists.
 - **Capability gate:** Shield preparation, signing, broadcasting, Ironwood receiver claims, and withdrawals return explicit blocked/501 states. Source review found the current CLI help describes Ironwood quickshield while the implementation hardcodes the Orchard selector and consumes eligible transparent account outputs without selecting a source path. No operation is advertised as live-proven. Agent CLI response schemas and compatibility with the user's current Zingo PC wallet file are still unverified.
 - **Privacy/security:** Replaced the user's previously shared public `t1` address in an existing tracked test and new tests with synthetic checksummed test addresses. Agent never reads/displays recovery words and sends no wallet material to the hosted API. The user must close Zingo PC before configuring the agent against the same data directory to avoid concurrent wallet writes.
 - **Verification:** `npm test` — 32 passed; `npm run typecheck` — passed; `npm run lint` — passed; `npm run build:api` — passed; `npm run build:agent` — passed; `git diff --check` — passed. Tests use synthetic CLI output; these are not live Zcash proof. No Zingo CLI was configured and no wallet file was opened.
@@ -46,9 +46,21 @@
 - **Implementation commit:** `070e75d` (`feat: add local Zcash rescue agent boundary`).
 - **Unresolved:** Live CLI compatibility, coin-summary schema and sync evidence, and a verified source-isolated Ironwood shield + user approval/sign/broadcast flow. No funds moved.
 
-## Phases 4–6
+## Phase 4 — Multi-chain orchestration
 
-Phase 4 is next. Each phase will be recorded and committed separately after its implementation, checks, security/privacy review, and major checkpoint.
+**Status:** Implemented and locally verified; live chain/provider/wallet behavior remains unverified per Phase 0 gates.
+
+- **Implementation:** Added `POST /api/v1/workflows` to create one idempotent workflow scanning both Base and Arbitrum, and `GET /api/v1/workflows/:jobId` to refresh both independent legs. Every serialized job now includes a derived overall state, per-chain stage and next action, and explicit unverified ZEC/shield state. Provider `SUCCESS` remains `provider_done_zec_unverified`; it never marks ZEC received or shielded. Quote expiry requires a fresh quote on that leg. Failure and refund on one leg do not stop refresh/status of the other.
+- **Recovery behavior:** No automatic retry or rebroadcast occurs for failed, refunded, or uncertain legs. `quote_expired` may request a fresh quote using the existing quote endpoint. Uncertain source submissions continue through nonce/event reconciliation. Agent receive-path mappings now survive agent restart in a local manifest that stores no EVM address and is ignored by Git; chain paths remain independent.
+- **Privacy/security:** Strict workflow creation schema rejects Recovery Vault mapping fields. Mongo keeps only the existing operational EVM/quote state; the local public receiver-to-chain manifest is never uploaded. ZEC receipt and shield status remain `not_verified_by_orchestrator` / `disabled_pending_wallet_verification` until the local wallet proof exists.
+- **Verification:** `npm test` — 38 passed (12 files); `npm run typecheck` — passed; `npm run lint` — passed; `npm run build:api` — passed; `npm run build:agent` — passed; `git diff --check` — passed.
+- **Major review checkpoint:** Adversarial review confirmed Base/Arbitrum legs refresh independently, partial outcomes remain visible, quote refresh stays explicit per leg, there is no blanket retry/rebroadcast, and local receiver metadata is never stored in Mongo. Uncertain/failed transfers require manual reconciliation. The local manifest contains only public receiver paths and chain labels; shield/broadcast remain disabled. Strict workflow request schema rejects identity/key fields. No blocking code finding remains; external integration blockers remain listed.
+- **Implementation commit:** Pending.
+- **Unresolved:** Live RPC/provider calls, user wallet connection, and Phase 0 funded final validation remain outside this code-only phase.
+
+## Phases 5–6
+
+Phase 5 is next. Each phase will be recorded and committed separately after its implementation, checks, security/privacy review, and major checkpoint.
 
 ## Final validation state
 

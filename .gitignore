@@ -14,6 +14,8 @@ Thumbs.db
 zallet-data/
 zebra-data/
 wallet-data/
+.zecrescue-agent-paths.json
+.zecrescue-agent-paths.json.*.tmp
 
 # Private keys / key material
 *.pem

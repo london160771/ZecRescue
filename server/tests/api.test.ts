@@ -44,4 +44,19 @@ describe("Phase 1 API boundary", () => {
     expect(deferred.status).toBe(400);
     expect(await deferred.json()).toEqual({ error: "UNSUPPORTED_CHAIN" });
   });
+
+  it("rejects wallet mapping fields on the multi-chain workflow endpoint", async () => {
+    const response = await fetch(`${await startApi()}/api/v1/workflows`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sourceAddress: "0x1111111111111111111111111111111111111111",
+        cleanRefundAddress: "0x2222222222222222222222222222222222222222",
+        idempotencyKey: "workflow-idempotency-key-0001",
+        recoveryVaultAddress: "must-not-be-persisted"
+      })
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "INVALID_REQUEST" });
+  });
 });

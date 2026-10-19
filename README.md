@@ -9,6 +9,7 @@ ZecRescue is a non-custodial emergency rescue tool. Locked V1 scope is native Ci
 - Phase 2 implements quote acquisition, signed-quote validation, quote-bound authorization preparation, provider status tracking, and sanitized quote metadata storage.
 - Phase 2 has not been verified against a live 1Click API in this environment. Unit fixtures are not live-provider proof.
 - Phase 3 adds the loopback-only `zecrescue-agent` and a fixed-command Zingolib CLI adapter. Its generated receiver and incoming-status behavior have not been exercised with the user's wallet in this environment. Shield/sign/broadcast/withdrawal are deliberately disabled pending proof of per-chain source isolation and the Ironwood destination.
+- Phase 4 combines Base and Arbitrum in one idempotent workflow with derived per-chain progress and explicit partial/failure/review states. Live RPC, provider, and wallet actions remain unverified.
 - There is no production frontend yet. Do not treat API unit tests as a live-chain proof.
 - No real-value transaction was signed or broadcast during Phases 1–6.
 
@@ -32,6 +33,14 @@ npm run dev:agent
 ```
 
 The only enabled wallet operations are receiver creation and guarded incoming-status inspection. The shield/sign/broadcast/withdrawal API paths return a blocked response; this is intentional, not a successful Zcash integration.
+
+## Multi-chain workflow API
+
+- `POST /api/v1/workflows` scans native USDC independently on Base and Arbitrum and creates one idempotent job with separate chain legs. Its strict body accepts only the source address, clean refund address, and idempotency key.
+- `GET /api/v1/workflows/:jobId` refreshes source/provider statuses independently and returns a derived workflow summary plus per-chain next actions.
+- Quote refresh after expiry is explicit per leg through the existing chain-specific quote endpoint. Failed/refunded or uncertain submissions are never automatically retried or rebroadcast.
+
+The workflow summary reports local ZEC receipt as unverified and shield status as disabled until the local wallet layer proves them. It does not store a permanent Recovery Vault mapping.
 
 ## Phase 1 API
 

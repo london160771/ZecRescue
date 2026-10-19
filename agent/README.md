@@ -25,7 +25,7 @@ Every request requires the local bearer token, an allowed `Origin` when supplied
 | `POST /v1/transactions/:txid/broadcast` `{}` | Broadcast a locally approved txid | Disabled |
 | `POST /v1/withdrawals/prepare` | Prepare an approved local withdrawal | Disabled |
 
-The `pathId` to chain/address association exists only in agent memory. The address itself is public and may be sent transiently to the quote API, but the hosted database must not retain a permanent Recovery Vault mapping.
+The `pathId` to chain/address association is stored in `.zecrescue-agent-paths.json` inside the configured local wallet directory so monitoring survives an agent restart. It contains only public receivers and source-chain labels, no EVM address or key material. It is local-only and git-ignored. The address may be sent transiently to the quote API, but the hosted database must not retain a permanent Recovery Vault mapping.
 
 ## Current Zingolib limitation
 

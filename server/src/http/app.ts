@@ -17,6 +17,11 @@ const createJobSchema = z.object({
   selectedChains: z.array(z.enum(V1_CHAIN_KEYS)).min(1).max(V1_CHAIN_KEYS.length),
   idempotencyKey: idempotencySchema
 }).strict();
+const createWorkflowSchema = z.object({
+  sourceAddress: addressSchema,
+  cleanRefundAddress: addressSchema,
+  idempotencyKey: idempotencySchema
+}).strict();
 const prepareSchema = z.object({
   amountBaseUnits: z.string().regex(/^\d{1,78}$/),
   zcashRecipient: z.string().regex(/^t1[1-9A-HJ-NP-Za-km-z]{33}$/)
@@ -109,6 +114,16 @@ export function createApiApp(repository: RescueJobRepository) {
     const body = parseBody(createJobSchema, request.body);
     const { job, created } = await service.createJob(body);
     response.status(created ? 201 : 200).json({ created, job: serializeRescueJob(job) });
+  });
+  app.post("/api/v1/workflows", async (request, response) => {
+    const body = parseBody(createWorkflowSchema, request.body);
+    const { job, created } = await service.createRecoveryWorkflow(body);
+    response.status(created ? 201 : 200).json({ created, job: serializeRescueJob(job) });
+  });
+  app.get("/api/v1/workflows/:jobId", async (request, response) => {
+    const jobId = parseBody(z.string().uuid(), request.params.jobId);
+    const job = await service.refreshJob(jobId);
+    response.json({ job: serializeRescueJob(job) });
   });
   app.get("/api/v1/jobs/:jobId", async (request, response) => {
     const jobId = parseBody(z.string().uuid(), request.params.jobId);

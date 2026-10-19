@@ -40,6 +40,8 @@ Those funded validations happen **after Phase 6**, with explicit user approval. 
 10. Each chain succeeds or fails independently. One failed leg cannot roll back another.
 11. App reports completion only after the relevant on-chain/local wallet evidence is confirmed. It never claims shielding before the ZEC is confirmed in the intended shielded pool.
 
+One Mongo job contains separate Base and Arbitrum legs. Overall progress is derived from leg state rather than persisted separately. Provider `SUCCESS` remains “ZEC not locally verified.” Quote refresh is explicit per chain after expiry; failed, refunded, or uncertain source legs are never blindly retried.
+
 ## 4. Authorization and source transfer
 
 Use EIP-3009 only for the verified native Circle USDC contract on Base or Arbitrum. Each authorization is one-use, amount-specific, destination/route-specific, chain-specific through domain separation, and short-lived. Enforce `validAfter`, `validBefore`, nonce-unused state, signer recovery, token, chain, route, and amount immediately before submission. The relayer is distinct from the victim and cannot redirect assets.
@@ -85,7 +87,7 @@ Required local capabilities (only expose an operation as enabled after its walle
 - report transaction and shielded-pool status;
 - prepare a user-approved withdrawal.
 
-The Phase 3 agent's current concrete API is `GET /healthz`, `GET /v1/capabilities`, `POST /v1/receive-paths`, and `GET /v1/receive-paths/:pathId/status`. It binds to `127.0.0.1`, uses a random local bearer token and exact origin allowlist, and never accepts key material or arbitrary RPC/CLI input. Shield preparation, signing, broadcast, Ironwood receiver claims, and withdrawals remain blocked in the current build because the available CLI source does not yet prove per-source input isolation and the Ironwood shield destination.
+The Phase 3 agent's current concrete API is `GET /healthz`, `GET /v1/capabilities`, `POST /v1/receive-paths`, and `GET /v1/receive-paths/:pathId/status`. It binds to `127.0.0.1`, uses a random local bearer token and exact origin allowlist, and never accepts key material or arbitrary RPC/CLI input. Path IDs map only to a chain label and public receiver in a local ignored manifest. Shield preparation, signing, broadcast, Ironwood receiver claims, and withdrawals remain blocked in the current build because the available CLI source does not yet prove per-source input isolation and the Ironwood shield destination.
 
 Zcash keys remain on the user's machine. No seed phrase/private key import into the web app or hosted backend. Bind agent and wallet RPC to loopback, authenticate local callers where practical, use strict origin/CSRF protections, and expose a minimal allowlisted API.
 

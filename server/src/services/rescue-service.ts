@@ -34,6 +34,7 @@ import {
   type RescueJob,
   type RescueLeg
 } from "../domain/jobs.js";
+import { summarizeWorkflow } from "../domain/workflow.js";
 import { nativeUsdcAbi } from "../evm/native-usdc-abi.js";
 import { isMainnetTransparentP2pkhAddress } from "../domain/zcash-address.js";
 import type { RescueJobRepository } from "../repositories/rescue-job-repository.js";
@@ -63,6 +64,8 @@ export type CreateJobInput = {
   selectedChains: readonly ChainKey[];
   idempotencyKey: string;
 };
+
+export type CreateRecoveryWorkflowInput = Omit<CreateJobInput, "selectedChains">;
 
 export type PrepareAuthorizationInput = Record<string, never>;
 
@@ -283,6 +286,10 @@ export class RescueService {
       if (raced) return { job: raced, created: false };
       throw error;
     }
+  }
+
+  async createRecoveryWorkflow(input: CreateRecoveryWorkflowInput): Promise<{ job: RescueJob; created: boolean }> {
+    return this.createJob({ ...input, selectedChains: V1_CHAIN_KEYS });
   }
 
   async getJob(jobId: string): Promise<RescueJob> {
@@ -686,6 +693,7 @@ export function serializeRescueJob(job: RescueJob) {
     createdAt: job.createdAt.toISOString(),
     updatedAt: job.updatedAt.toISOString(),
     revision: job.revision,
+    workflow: summarizeWorkflow(job),
     legs: job.legs.map((leg) => ({
       chainKey: leg.chainKey,
       chainId: leg.chainId,
