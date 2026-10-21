@@ -1,0 +1,107 @@
+diff --git a/zingolib/src/lightclient/mock_chain_tests.rs b/zingolib/src/lightclient/mock_chain_tests.rs
+index 054af14..a7f4c4c 100644
+--- a/zingolib/src/lightclient/mock_chain_tests.rs
++++ b/zingolib/src/lightclient/mock_chain_tests.rs
+@@ -88,6 +88,102 @@ async fn fund(net: &MockNet, receivers: Vec<(&str, u64, Option<&str>)>, extra_bl
+     chain.mine_empty_blocks(extra_blocks);
+ }
+ 
++/// A seed-only recovery discovers a used transparent receiver after an unused index.
++///
++/// The mock chain contains a transparent output only for external index 1. External
++/// index 0 is derived by the disposable source wallet but never funded. A second
++/// wallet is then created from the same deterministic test seed, configured with
++/// the production default transparent discovery gap, and synced through the real
++/// mock indexer and transparent scanner.
++#[tokio::test]
++async fn seed_recovery_discovers_used_transparent_receiver_after_unused_index() {
++    use pepper_sync::keys::transparent::{TransparentAddressId, TransparentScope};
++    use pepper_sync::wallet::KeyIdInterface;
++    use zcash_transparent::keys::NonHardenedChildIndex;
++
++    const FUNDING: u64 = 50_000;
++    let seed = zingo_test_vectors::seeds::HOSPITAL_MUSEUM_SEED;
++    let mut net = MockNet::launch().await;
++
++    let mut source = net.client(seed).await;
++    let index0 = TransparentAddressId::new(
++        zip32::AccountId::ZERO,
++        TransparentScope::External,
++        NonHardenedChildIndex::ZERO,
++    );
++    let (index1, _) = source
++        .generate_transparent_address(zip32::AccountId::ZERO, false)
++        .await
++        .expect("the disposable source wallet can derive the skipped receiver");
++    assert_eq!(index1.scope(), TransparentScope::External);
++    assert_eq!(index1.address_index().index(), 1);
++
++    let index0_is_issued = source
++        .wallet()
++        .read()
++        .await
++        .transparent_addresses()
++        .contains_key(&index0);
++    assert!(index0_is_issued);
++    let index1_address = source
++        .wallet()
++        .read()
++        .await
++        .transparent_addresses()
++        .get(&index1)
++        .expect("the derived receiver is in the source wallet inventory")
++        .clone();
++
++    // The only output in this synthetic transaction pays index 1. Index 0
++    // remains unused; no public network or real funds are involved.
++    fund(&net, vec![(&index1_address, FUNDING, None)], 1).await;
++
++    // Construct a fresh wallet from the same seed, as in seed-only recovery.
++    // The production-patched runtime uses TransparentAddressDiscovery::default().
++    let mut recovered = net.client(seed).await;
++    let mut settings = recovered.wallet().read().await.wallet_settings.clone();
++    settings.sync_config.transparent_address_discovery =
++        pepper_sync::config::TransparentAddressDiscovery::default();
++    assert_eq!(
++        settings.sync_config.transparent_address_discovery.gap_limit,
++        10
++    );
++    recovered.update_wallet_settings(settings).await;
++
++    recovered
++        .sync_and_await()
++        .await
++        .expect("seed recovery syncs through the mock indexer");
++
++    let wallet = recovered.wallet().read().await;
++    let inventory = wallet.transparent_addresses();
++    assert!(inventory.contains_key(&index0));
++    assert!(inventory.contains_key(&index1));
++    assert_eq!(inventory.get(&index1), Some(&index1_address));
++    assert_eq!(
++        inventory
++            .keys()
++            .filter(|id| id.account_id() == zip32::AccountId::ZERO
++                && id.scope() == TransparentScope::External)
++            .count(),
++        2,
++        "the recovered inventory keeps index 1 and omits unfunded trailing indexes"
++    );
++    drop(wallet);
++
++    let balance = recovered
++        .account_balance(zip32::AccountId::ZERO)
++        .await
++        .expect("the recovered account balance is available");
++    assert_eq!(
++        balance
++            .confirmed_transparent_balance
++            .expect("the seed-derived account has transparent viewing capability")
++            .into_u64(),
++        FUNDING
++    );
++}
++
+ /// The mock-net proof: a funding block scans to a confirmed balance,
+ /// a real quick_send round-trips through the mock's mempool into the
+ /// next block, and the post-confirmation balance carries the exact

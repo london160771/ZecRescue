@@ -1,0 +1,188 @@
+name: Verify Zingolib transparent recovery gap
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-gap-recovery:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout ZecRescue proof branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.ref }}
+          path: zecrescue
+
+      - name: Checkout exact pinned Zingolib
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: zingolabs/zingolib
+          ref: 7a542ce4a6b14d83bd0108ff3e6c5d8d4c8c71a8
+          path: zingolib
+
+      - name: Verify source revisions and lockfile
+        shell: pwsh
+        run: |
+          $zecrescue = Join-Path $env:GITHUB_WORKSPACE 'zecrescue'
+          $zingolib = Join-Path $env:GITHUB_WORKSPACE 'zingolib'
+          $zecHead = (git -C $zecrescue rev-parse HEAD).Trim()
+          $zingoHead = (git -C $zingolib rev-parse HEAD).Trim()
+          if ($zecHead -ne $env:GITHUB_SHA) { throw "ZecRescue checkout does not match the dispatched commit." }
+          if ($zingoHead -ne '7a542ce4a6b14d83bd0108ff3e6c5d8d4c8c71a8') { throw "Zingolib checkout does not match the pinned revision." }
+          $lockHash = (Get-FileHash (Join-Path $zingolib 'Cargo.lock') -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($lockHash -ne '27c8b30118c9c9f3fffa6210ed78c892539b98f4c32d27e059831062c120eb70') { throw "Pinned Zingolib Cargo.lock hash mismatch." }
+          Write-Host "ZecRescue proof commit: $zecHead"
+          Write-Host "Zingolib revision: $zingoHead"
+          Write-Host "Cargo.lock SHA-256 verified: $lockHash"
+
+      - name: Configure MSVC
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: 1.97.1
+
+      - name: Extract canonical test patch and apply
+        id: apply
+        shell: bash
+        run: |
+          set -euo pipefail
+          zecrescue="$(cygpath -u "$GITHUB_WORKSPACE/zecrescue")"
+          zingolib="$(cygpath -u "$GITHUB_WORKSPACE/zingolib")"
+          temp="$(cygpath -u "$RUNNER_TEMP")"
+          patch_file="$temp/zingolib-gap-recovery-test.patch"
+          git -C "$zecrescue" show "$GITHUB_SHA:phase0/patches/zingolib-gap-recovery-test.patch" > "$patch_file"
+          patch_sha="$(sha256sum "$patch_file" | awk '{print $1}')"
+          if [[ "$patch_sha" != "1e0e7d171af8bd4363109d21062ecf5f9fcd672260eaa58224502286ba742ac8" ]]; then
+            echo "Canonical test patch SHA-256 mismatch." >&2
+            exit 1
+          fi
+          lock_before="$(sha256sum "$zingolib/Cargo.lock" | awk '{print $1}')"
+          if [[ "$lock_before" != "27c8b30118c9c9f3fffa6210ed78c892539b98f4c32d27e059831062c120eb70" ]]; then
+            echo "Cargo.lock hash changed before applying the test patch." >&2
+            exit 1
+          fi
+          git -C "$zingolib" apply --check "$patch_file"
+          git -C "$zingolib" apply "$patch_file"
+          changed="$(git -C "$zingolib" diff --name-only)"
+          if [[ "$changed" != "zingolib/src/lightclient/mock_chain_tests.rs" ]]; then
+            echo "The recovery patch changed an unexpected file: $changed" >&2
+            exit 1
+          fi
+          git -C "$zingolib" diff --check
+          lock_after="$(sha256sum "$zingolib/Cargo.lock" | awk '{print $1}')"
+          if [[ "$lock_after" != "$lock_before" ]]; then
+            echo "Cargo.lock changed after applying the test-only patch." >&2
+            exit 1
+          fi
+          echo "test_patch_sha256=$patch_sha" >> "$GITHUB_OUTPUT"
+          echo "cargo_lock_sha256=$lock_after" >> "$GITHUB_OUTPUT"
+          echo "Applied one audited test-only file; Cargo.lock is unchanged."
+
+      - name: Run the focused transparent recovery test
+        id: focused-test
+        shell: pwsh
+        run: |
+          $testName = 'lightclient::mock_chain_tests::seed_recovery_discovers_used_transparent_receiver_after_unused_index'
+          $testCommand = "cargo test --locked -p zingolib --lib $testName -- --exact --nocapture"
+          $logPath = Join-Path $env:RUNNER_TEMP 'zingolib-gap-recovery-test.log'
+          & cargo test --locked -p zingolib --lib $testName -- --exact --nocapture *> $logPath
+          $testExit = $LASTEXITCODE
+          $logText = if (Test-Path $logPath) { Get-Content $logPath -Raw } else { '' }
+          if ($logText) { Write-Output $logText }
+          $escapedName = [regex]::Escape($testName)
+          $passedLine = $logText -match "(?m)^test $escapedName ... ok$"
+          $failedLine = $logText -match "(?m)^test $escapedName ... FAILED$"
+          if ($testExit -eq 0 -and $passedLine -and $logText -match 'test result: ok\. 1 passed') {
+            $result = 'PASS'
+          } elseif ($failedLine) {
+            $result = 'TEST_FAIL'
+          } elseif ($testExit -ne 0) {
+            $result = 'COMPILE_FAIL'
+          } else {
+            $result = 'TEST_SELECTION_FAIL'
+          }
+          "ZINGOLIB_GAP_TEST_RESULT=$result" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+          "ZINGOLIB_GAP_TEST_COMMAND=$testCommand" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+          "Exact focused test result: $result"
+          if ($result -ne 'PASS') { exit 1 }
+
+      - name: Verify lockfile and source diff after test
+        if: always() && steps.apply.outcome == 'success'
+        shell: pwsh
+        run: |
+          $zingolib = Join-Path $env:GITHUB_WORKSPACE 'zingolib'
+          $lockHash = (Get-FileHash (Join-Path $zingolib 'Cargo.lock') -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($lockHash -ne '27c8b30118c9c9f3fffa6210ed78c892539b98f4c32d27e059831062c120eb70') { throw "Cargo.lock changed during the focused test." }
+          $changed = (git -C $zingolib diff --name-only).Trim()
+          if ($changed -ne 'zingolib/src/lightclient/mock_chain_tests.rs') { throw "Unexpected Zingolib source changes after the test." }
+          Write-Host "Cargo.lock remains unchanged: $lockHash"
+          Write-Host "Only the focused test file is modified."
+
+      - name: Write proof provenance
+        if: always()
+        shell: pwsh
+        env:
+          TEST_PATCH_SHA256: ${{ steps.apply.outputs.test_patch_sha256 }}
+          CARGO_LOCK_SHA256: ${{ steps.apply.outputs.cargo_lock_sha256 }}
+        run: |
+          $result = if ($env:ZINGOLIB_GAP_TEST_RESULT) { $env:ZINGOLIB_GAP_TEST_RESULT } else { 'NOT_RUN' }
+          $testCommand = if ($env:ZINGOLIB_GAP_TEST_COMMAND) { $env:ZINGOLIB_GAP_TEST_COMMAND } else { 'cargo test --locked -p zingolib --lib lightclient::mock_chain_tests::seed_recovery_discovers_used_transparent_receiver_after_unused_index -- --exact --nocapture' }
+          $lockPath = Join-Path $env:GITHUB_WORKSPACE 'zingolib/Cargo.lock'
+          $lockAfter = if (Test-Path $lockPath) { (Get-FileHash $lockPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
+          $payload = [ordered]@{
+            zecrescueBranch = $env:GITHUB_REF_NAME
+            zecrescueCommit = $env:GITHUB_SHA
+            zingolibRevision = '7a542ce4a6b14d83bd0108ff3e6c5d8d4c8c71a8'
+            testName = 'seed_recovery_discovers_used_transparent_receiver_after_unused_index'
+            transparentDiscoveryGap = 10
+            externalIndex0Activity = 'none'
+            externalIndex1Activity = 'one synthetic transparent MockNet output'
+            recoveryDiscoveredIndex1 = ($result -eq 'PASS')
+            cargoTestResult = $result
+            testPatchSha256 = $env:TEST_PATCH_SHA256
+            cargoLockSha256BeforeAndAfter = $lockAfter
+            expectedCargoLockSha256 = '27c8b30118c9c9f3fffa6210ed78c892539b98f4c32d27e059831062c120eb70'
+            rustcVersion = (& rustc --version).Trim()
+            cargoVersion = (& cargo --version).Trim()
+            exactCargoTestCommand = $testCommand
+          }
+          $path = Join-Path $env:RUNNER_TEMP 'zingolib-gap-recovery-provenance.json'
+          $payload | ConvertTo-Json -Depth 5 | Set-Content -Path $path -Encoding utf8
+          Write-Host "Recovery proof result: $result"
+          Write-Host "Provenance written without wallet material."
+
+      - name: Summarize focused recovery proof
+        if: always()
+        shell: pwsh
+        run: |
+          $result = if ($env:ZINGOLIB_GAP_TEST_RESULT) { $env:ZINGOLIB_GAP_TEST_RESULT } else { 'NOT_RUN' }
+          $recovered = if ($result -eq 'PASS') { 'YES' } else { 'NOT PROVEN' }
+          $summary = @(
+            '### Zingolib transparent recovery proof',
+            '',
+            '- Test: seed_recovery_discovers_used_transparent_receiver_after_unused_index',
+            '- Zingolib revision: 7a542ce4a6b14d83bd0108ff3e6c5d8d4c8c71a8',
+            '- Transparent discovery gap: 10',
+            '- External index 0 activity: none',
+            '- External index 1 activity: one synthetic transparent output on MockNet',
+            "- Recovery discovered index 1: $recovered",
+            "- Result: $result",
+            '',
+            'The test uses the real pinned transparent scanner. No wallet secrets, real wallet, or funds are involved.'
+          )
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ($summary -join [Environment]::NewLine) -Encoding utf8
+
+      - name: Upload non-secret proof provenance
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: zingolib-gap-recovery-provenance-${{ github.run_id }}
+          path: ${{ runner.temp }}/zingolib-gap-recovery-provenance.json
+          if-no-files-found: error
+          retention-days: 14
