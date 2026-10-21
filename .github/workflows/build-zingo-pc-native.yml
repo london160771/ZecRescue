@@ -46,6 +46,28 @@ jobs:
           version: 31.1
           repo-token: ${{ github.token }}
 
+      - name: Extract canonical audited patch blob
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch_dir="$(cygpath -u "$RUNNER_TEMP")"
+          patch_file="$patch_dir/zecrescue-audited-${GITHUB_RUN_ID}.patch"
+          if [[ -e "$patch_file" ]]; then
+            echo 'The temporary audited patch already exists; refusing to overwrite.' >&2
+            exit 1
+          fi
+          git show "${GITHUB_SHA}:phase0/patches/zingo-pc-2.0.26-189-allow-gap.patch" > "$patch_file"
+          actual_patch_sha="$(sha256sum -- "$patch_file" | cut -d ' ' -f 1)"
+          expected_patch_sha='866363eac32d71a5803f31a5c4c396e182bd903ae5cf0038bf6608c04c6232aa'
+          if [[ "$actual_patch_sha" != "$expected_patch_sha" ]]; then
+            echo "Unexpected canonical patch SHA-256: $actual_patch_sha" >&2
+            exit 1
+          fi
+          env_file="$(cygpath -u "$GITHUB_ENV")"
+          printf 'ZECRESCUE_AUDITED_PATCH_PATH=%s\n' "$(cygpath -aw "$patch_file")" >> "$env_file"
+          printf 'ZECRESCUE_AUDITED_PATCH_SHA256=%s\n' "$expected_patch_sha" >> "$env_file"
+          printf 'Canonical audited patch SHA-256: %s\n' "$actual_patch_sha"
+
       - name: Verify source pins and apply audited patch
         shell: pwsh
         run: |
@@ -54,7 +76,14 @@ jobs:
           $expectedCommit = '4ce0368254150d305b5ac50e3a7f8d536ef7bc47'
           $expectedLock = '557f02c09424ad518f84d83db64e98fe3275696d98cf9fe42f646407e1af2cc7'
           $expectedZingolib = '7a542ce4a6b14d83bd0108ff3e6c5d8d4c8c71a8'
-          $patchPath = Join-Path $env:GITHUB_WORKSPACE 'phase0/patches/zingo-pc-2.0.26-189-allow-gap.patch'
+          $patchPath = $env:ZECRESCUE_AUDITED_PATCH_PATH
+          if ([string]::IsNullOrWhiteSpace($patchPath) -or -not (Test-Path -LiteralPath $patchPath -PathType Leaf)) {
+            throw 'The canonical Git-blob-derived audited patch is missing.'
+          }
+          $patchHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $patchPath).Hash.ToLowerInvariant()
+          if ($patchHash -ne $env:ZECRESCUE_AUDITED_PATCH_SHA256) {
+            throw "The canonical audited patch hash changed: $patchHash"
+          }
           $actualCommit = (& git -C $sourceRoot rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0 -or $actualCommit -ne $expectedCommit) {
             throw "Unexpected Zingo PC source commit: $actualCommit"
@@ -85,8 +114,9 @@ jobs:
             $nativeSource.Contains('wallet.generate_transparent_address(AccountId::ZERO, true)'),
             $nativeSource.Contains('wallet.generate_transparent_address(AccountId::ZERO, false)'),
             $nativeSource.Contains('transparent_address_discovery: TransparentAddressDiscovery::default()'),
-            $nativeSource.Contains('wallet.wallet_settings.sync_config.transparent_address_discovery.gap_limit = wanted;'),
-            $nativeSource.Contains('wallet.mark_dirty();')
+            $nativeSource.Contains('let default_gap_limit = TransparentAddressDiscovery::default().gap_limit;'),
+            ($nativeSource -match '(?s)if\s+wallet\.wallet_settings\.sync_config\.transparent_address_discovery\.gap_limit\s*<\s*default_gap_limit.*?wallet\.wallet_settings\.sync_config\.transparent_address_discovery\.gap_limit\s*=\s*default_gap_limit;\s*wallet\.mark_dirty\(\);'),
+            $nativeSource.Contains('lightclient.save_task().await')
           )
           if ($requiredChecks -contains $false) { throw 'A reviewed strict, allow-gap, or recovery-gap behavior is missing.' }
           $lockAfterPatch = (Get-FileHash -Algorithm SHA256 -LiteralPath $lockPath).Hash.ToLowerInvariant()
@@ -148,8 +178,9 @@ jobs:
           }
           $nativeExports = @($nativeExportsJson | ConvertFrom-Json)
           $nativeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $nativePath).Hash.ToLowerInvariant()
-          $patchPath = Join-Path $env:GITHUB_WORKSPACE 'phase0/patches/zingo-pc-2.0.26-189-allow-gap.patch'
+          $patchPath = $env:ZECRESCUE_AUDITED_PATCH_PATH
           $patchHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $patchPath).Hash.ToLowerInvariant()
+          if ($patchHash -ne $env:ZECRESCUE_AUDITED_PATCH_SHA256) { throw 'The applied canonical patch hash changed during the build.' }
           $versionLines = Get-Content -LiteralPath (Join-Path $sourceRoot 'rust-toolchain')
           if (($versionLines -join '').Trim() -ne 'stable') { throw 'The upstream Rust toolchain declaration changed.' }
           $artifactRoot = Join-Path $env:RUNNER_TEMP ('zecrescue-zingo-native-' + $env:GITHUB_RUN_ID)

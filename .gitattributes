@@ -1,0 +1,2 @@
+# Preserve reviewed unified patches as LF and ignore their context-marker spaces in diff checks.
+phase0/patches/*.patch text eol=lf whitespace=-blank-at-eol
