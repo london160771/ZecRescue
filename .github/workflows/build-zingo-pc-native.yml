@@ -1,0 +1,189 @@
+name: Build reviewed Zingo PC Windows native module
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout ZecRescue
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Checkout pinned Zingo PC source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: zingolabs/zingo-pc
+          ref: 4ce0368254150d305b5ac50e3a7f8d536ef7bc47
+          path: upstream/zingo-pc
+          persist-credentials: false
+
+      - name: Set up upstream-recommended Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.18.0
+
+      - name: Set up upstream Rust stable toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: stable
+          target: x86_64-pc-windows-msvc
+
+      - name: Configure the runner's existing MSVC x64 environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
+        with:
+          arch: x64
+
+      - name: Set up pinned Protocol Buffers compiler
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b
+        with:
+          version: 31.1
+          repo-token: ${{ github.token }}
+
+      - name: Verify source pins and apply audited patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceRoot = Join-Path $env:GITHUB_WORKSPACE 'upstream/zingo-pc'
+          $expectedCommit = '4ce0368254150d305b5ac50e3a7f8d536ef7bc47'
+          $expectedLock = '557f02c09424ad518f84d83db64e98fe3275696d98cf9fe42f646407e1af2cc7'
+          $expectedZingolib = '7a542ce4a6b14d83bd0108ff3e6c5d8d4c8c71a8'
+          $patchPath = Join-Path $env:GITHUB_WORKSPACE 'phase0/patches/zingo-pc-2.0.26-189-allow-gap.patch'
+          $actualCommit = (& git -C $sourceRoot rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualCommit -ne $expectedCommit) {
+            throw "Unexpected Zingo PC source commit: $actualCommit"
+          }
+          $lockPath = Join-Path $sourceRoot 'native/Cargo.lock'
+          $lockBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $lockPath).Hash.ToLowerInvariant()
+          if ($lockBefore -ne $expectedLock) {
+            throw "Unexpected native/Cargo.lock hash: $lockBefore"
+          }
+          if (-not (Select-String -LiteralPath (Join-Path $sourceRoot 'native/Cargo.toml') -SimpleMatch $expectedZingolib -Quiet)) {
+            throw 'The native manifest no longer pins the reviewed Zingolib revision.'
+          }
+          & git -C $sourceRoot apply --check $patchPath
+          if ($LASTEXITCODE -ne 0) { throw 'The audited patch does not apply cleanly.' }
+          & git -C $sourceRoot apply $patchPath
+          if ($LASTEXITCODE -ne 0) { throw 'Applying the audited patch failed.' }
+          & git -C $sourceRoot apply --reverse --check $patchPath
+          if ($LASTEXITCODE -ne 0) { throw 'The audited patch cannot be reversed cleanly.' }
+          & git -C $sourceRoot diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'Patched native source has whitespace errors.' }
+          $changed = @(& git -C $sourceRoot diff --name-only)
+          if ($changed.Count -ne 1 -or $changed[0] -ne 'native/src/lib.rs') {
+            throw "Unexpected patched source surface: $($changed -join ', ')"
+          }
+          $nativeSource = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'native/src/lib.rs')
+          $requiredChecks = @(
+            $nativeSource.Contains('create_new_transparent_address_allow_gap", create_new_transparent_address_allow_gap'),
+            $nativeSource.Contains('wallet.generate_transparent_address(AccountId::ZERO, true)'),
+            $nativeSource.Contains('wallet.generate_transparent_address(AccountId::ZERO, false)'),
+            $nativeSource.Contains('transparent_address_discovery: TransparentAddressDiscovery::default()'),
+            $nativeSource.Contains('wallet.wallet_settings.sync_config.transparent_address_discovery.gap_limit = wanted;'),
+            $nativeSource.Contains('wallet.mark_dirty();')
+          )
+          if ($requiredChecks -contains $false) { throw 'A reviewed strict, allow-gap, or recovery-gap behavior is missing.' }
+          $lockAfterPatch = (Get-FileHash -Algorithm SHA256 -LiteralPath $lockPath).Hash.ToLowerInvariant()
+          if ($lockAfterPatch -ne $expectedLock) { throw 'Cargo.lock changed while applying the source patch.' }
+
+      - name: Install pinned Yarn Classic
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm install --global yarn@1.22.22
+          if ($LASTEXITCODE -ne 0) { throw 'Installing pinned Yarn Classic failed.' }
+          if ((node --version).Trim() -ne 'v22.18.0') { throw 'Unexpected Node.js version.' }
+          if ((yarn --version).Trim() -ne '1.22.22') { throw 'Unexpected Yarn version.' }
+          if ((protoc --version).Trim() -notmatch '^libprotoc 31.1$') { throw 'Unexpected protoc version.' }
+          if (-not [Environment]::Is64BitOperatingSystem) { throw 'The Windows runner is not x64.' }
+          cmake --version
+          if ($LASTEXITCODE -ne 0) { throw 'CMake is required by the upstream source build but is unavailable.' }
+          cl.exe /Bv
+          if ($LASTEXITCODE -ne 0) { throw 'The runner MSVC compiler is unavailable.' }
+
+      - name: Build only the Windows x64 native addon
+        shell: pwsh
+        env:
+          CI: 'true'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceRoot = Join-Path $env:GITHUB_WORKSPACE 'upstream/zingo-pc'
+          Push-Location $sourceRoot
+          try {
+            yarn install --frozen-lockfile --non-interactive --ignore-scripts
+            if ($LASTEXITCODE -ne 0) { throw 'Frozen Yarn dependency installation failed.' }
+            yarn neon-win-x64
+            if ($LASTEXITCODE -ne 0) { throw 'The upstream Windows x64 native build failed.' }
+          } finally {
+            Pop-Location
+          }
+          $nativePath = Join-Path $sourceRoot 'src/native.node'
+          if (-not (Test-Path -LiteralPath $nativePath -PathType Leaf)) { throw 'Build did not create src/native.node.' }
+          $lockHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $sourceRoot 'native/Cargo.lock')).Hash.ToLowerInvariant()
+          if ($lockHash -ne '557f02c09424ad518f84d83db64e98fe3275696d98cf9fe42f646407e1af2cc7') {
+            throw 'Cargo.lock changed during the native build.'
+          }
+          & git -C $sourceRoot diff --exit-code -- package.json yarn.lock native/Cargo.toml native/Cargo.lock
+          if ($LASTEXITCODE -ne 0) { throw 'A package manifest or lockfile changed during the native build.' }
+          $bytes = [IO.File]::ReadAllBytes($nativePath)
+          if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) { throw 'native.node is not a Windows PE binary.' }
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+          if ($peOffset -lt 0 -or $peOffset + 6 -gt $bytes.Length) { throw 'native.node has an invalid PE header offset.' }
+          if ($bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or $bytes[$peOffset + 2] -ne 0 -or $bytes[$peOffset + 3] -ne 0) {
+            throw 'native.node has an invalid PE signature.'
+          }
+          if ([BitConverter]::ToUInt16($bytes, $peOffset + 4) -ne 0x8664) { throw 'native.node is not x86-64.' }
+          Push-Location $sourceRoot
+          try {
+            $nativeExportsJson = (& node -e "const n=require('./src/native.node'); const names=Object.keys(n).sort(); if(typeof n.create_new_transparent_address!=='function'||typeof n.create_new_transparent_address_allow_gap!=='function') process.exit(2); process.stdout.write(JSON.stringify(names));")
+            if ($LASTEXITCODE -ne 0) { throw 'The native module is missing the strict or allow-gap transparent receiver method.' }
+          } finally {
+            Pop-Location
+          }
+          $nativeExports = @($nativeExportsJson | ConvertFrom-Json)
+          $nativeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $nativePath).Hash.ToLowerInvariant()
+          $patchPath = Join-Path $env:GITHUB_WORKSPACE 'phase0/patches/zingo-pc-2.0.26-189-allow-gap.patch'
+          $patchHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $patchPath).Hash.ToLowerInvariant()
+          $versionLines = Get-Content -LiteralPath (Join-Path $sourceRoot 'rust-toolchain')
+          if (($versionLines -join '').Trim() -ne 'stable') { throw 'The upstream Rust toolchain declaration changed.' }
+          $artifactRoot = Join-Path $env:RUNNER_TEMP ('zecrescue-zingo-native-' + $env:GITHUB_RUN_ID)
+          if (Test-Path -LiteralPath $artifactRoot) { throw 'Artifact directory already exists; refusing to overwrite.' }
+          New-Item -ItemType Directory -Path $artifactRoot | Out-Null
+          Copy-Item -LiteralPath $nativePath -Destination (Join-Path $artifactRoot 'native.node')
+          Copy-Item -LiteralPath $patchPath -Destination (Join-Path $artifactRoot 'audited.patch')
+          $appliedDiff = (& git -C $sourceRoot diff -- native/src/lib.rs) | Out-String
+          Set-Content -LiteralPath (Join-Path $artifactRoot 'applied-native.diff') -Value $appliedDiff -Encoding utf8
+          $provenance = [ordered]@{
+            zecrescueCommit = (& git -C $env:GITHUB_WORKSPACE rev-parse HEAD).Trim()
+            zingoPcTag = 'zingo-pc-2.0.26-189'
+            zingoPcSourceCommit = '4ce0368254150d305b5ac50e3a7f8d536ef7bc47'
+            backportedGapFixCommit = 'f7e7a233f68b71553a00683c7d1cb85d837c75df'
+            zingolibRevision = '7a542ce4a6b14d83bd0108ff3e6c5d8d4c8c71a8'
+            cargoLockSha256 = $lockHash
+            auditedPatchSha256 = $patchHash
+            targetTriple = 'x86_64-pc-windows-msvc'
+            nodeVersion = (node --version).Trim()
+            yarnVersion = (yarn --version).Trim()
+            rustcVersion = (rustc --version).Trim()
+            cargoVersion = (cargo --version).Trim()
+            protocVersion = (protoc --version).Trim()
+            nativeNodeSha256 = $nativeHash
+            nativeExportInventory = $nativeExports
+          }
+          $provenance | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $artifactRoot 'provenance.json') -Encoding utf8
+          Write-Output "Built Windows x64 native.node SHA-256: $nativeHash"
+
+      - name: Upload native module and provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: zingo-native-win-x64-${{ github.sha }}
+          path: ${{ runner.temp }}/zecrescue-zingo-native-${{ github.run_id }}/
+          if-no-files-found: error
+          retention-days: 7
+
