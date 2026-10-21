@@ -2,10 +2,12 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadAgentConfig } from "../src/config.js";
+import { AgentError, type ReceiverCreationDiagnostic } from "../src/errors.js";
 import { createAgentApp } from "../src/http/app.js";
-import type { AgentCapabilities, ReceivePath, ReceiveStatus, ShieldPreparation, ShieldStatus, ShieldSubmission, SourceChain, ZcashWalletProvider } from "../src/wallet-provider.js";
+import type { AgentCapabilities, ReceivePath, ReceiveStatus, ShieldPreparation, ShieldStatus, ShieldSubmission, SourceChain, WalletDiagnostics, ZcashWalletProvider } from "../src/wallet-provider.js";
 
 class TestWalletProvider implements ZcashWalletProvider {
+  receiverCreationDiagnostic: ReceiverCreationDiagnostic | undefined;
   async getCapabilities(): Promise<AgentCapabilities> {
     return {
       network: "mainnet",
@@ -15,6 +17,7 @@ class TestWalletProvider implements ZcashWalletProvider {
       verification: "not_configured",
       walletOpen: false,
       canGenerateTransparentReceiver: false,
+      receiverCreationBlocker: null,
       canMonitorReceiver: false,
       canGenerateIronwoodReceiver: false,
       canPrepareShielding: false,
@@ -30,10 +33,19 @@ class TestWalletProvider implements ZcashWalletProvider {
     if (allowRemoteLightwalletd !== true) throw new Error("explicit sync consent required");
     return this.getCapabilities();
   }
-  async listReceivePaths(): Promise<ReceivePath[]> { return []; }
-  async createReceivePath(sourceChain: SourceChain, allowRemoteLightwalletd: true): Promise<ReceivePath> {
+  async getWalletDiagnostics(allowRemoteLightwalletd: true): Promise<WalletDiagnostics> {
     if (allowRemoteLightwalletd !== true) throw new Error("explicit sync consent required");
-    return { pathId: "839138ae-3d5b-4e8f-b811-8f66f2fb3191", sourceChain, address: "test-only", accountId: 0, receiverType: "transparent_p2pkh", generatedAt: new Date(0).toISOString() };
+    return { network: "mainnet", walletType: "Loaded from seed or mnemonic phrase", reconciliationSupported: true, sync: { state: "synced", taskState: "idle", heightRelation: "at_tip_or_ahead", walletHeight: 1, serverHeight: 1 }, receivers: [] };
+  }
+  async listReceivePaths(): Promise<ReceivePath[]> { return []; }
+  async createReceivePath(sourceChain: SourceChain, pathId: string, allowRemoteLightwalletd: true): Promise<ReceivePath> {
+    if (allowRemoteLightwalletd !== true) throw new Error("explicit sync consent required");
+    if (this.receiverCreationDiagnostic) throw new AgentError(503, "ZINGO_RECEIVER_CREATION_FAILED_NO_CHANGE", this.receiverCreationDiagnostic);
+    return { pathId, sourceChain, address: "test-only", accountId: 0, receiverType: "transparent_p2pkh", generatedAt: new Date(0).toISOString() };
+  }
+  async reconcileSoleUnregisteredReceivePath(sourceChain: SourceChain, confirmSoleUnregistered: true, allowRemoteLightwalletd: true): Promise<ReceivePath> {
+    if (allowRemoteLightwalletd !== true || confirmSoleUnregistered !== true) throw new Error("explicit unique receiver confirmation required");
+    return { pathId: "a39138ae-3d5b-4e8f-b811-8f66f2fb3191", sourceChain, address: "test-only", accountId: 0, receiverType: "transparent_p2pkh", generatedAt: new Date(0).toISOString() };
   }
   async getReceiveStatus(pathId: string, allowRemoteLightwalletd: true): Promise<ReceiveStatus> {
     if (allowRemoteLightwalletd !== true) throw new Error("explicit sync consent required");
@@ -57,6 +69,7 @@ class TestWalletProvider implements ZcashWalletProvider {
 let server: Server | undefined;
 let origin: string;
 const token = "t".repeat(48);
+let testProvider: TestWalletProvider;
 
 async function startServer(): Promise<void> {
   const probe = createServer();
@@ -64,7 +77,8 @@ async function startServer(): Promise<void> {
   const probeAddress = probe.address() as AddressInfo;
   await new Promise<void>((resolve, reject) => probe.close((error) => error ? reject(error) : resolve()));
   const config = loadAgentConfig({ ZECRESCUE_AGENT_TOKEN: token, ZECRESCUE_AGENT_PORT: String(probeAddress.port) });
-  server = createServer(createAgentApp(config, new TestWalletProvider()));
+  testProvider = new TestWalletProvider();
+  server = createServer(createAgentApp(config, testProvider));
   await new Promise<void>((resolve) => server!.listen(config.port, "127.0.0.1", resolve));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("test server did not bind");
@@ -160,6 +174,73 @@ describe("local agent HTTP safety boundary", () => {
       method: "POST", headers, body: JSON.stringify({ allowRemoteLightwalletd: true })
     });
     expect(consented.status).toBe(200);
+  });
+
+  it("requires explicit lightwalletd consent for read-only wallet diagnostics", async () => {
+    await startServer();
+    const headers = { origin: "http://localhost:5173", authorization: `Bearer ${token}`, "content-type": "application/json" };
+    const missingConsent = await fetch(`${origin}/v1/wallet/diagnostics`, { method: "POST", headers, body: "{}" });
+    expect(missingConsent.status).toBe(400);
+    const consented = await fetch(`${origin}/v1/wallet/diagnostics`, {
+      method: "POST", headers, body: JSON.stringify({ allowRemoteLightwalletd: true })
+    });
+    expect(consented.status).toBe(200);
+    expect(await consented.json()).toMatchObject({
+      network: "mainnet",
+      walletType: "Loaded from seed or mnemonic phrase",
+      reconciliationSupported: true,
+      sync: { state: "synced", taskState: "idle", heightRelation: "at_tip_or_ahead", walletHeight: 1, serverHeight: 1 },
+      receivers: []
+    });
+  });
+
+  it("returns sanitized receiver creation stage and inventory counts", async () => {
+    await startServer();
+    testProvider.receiverCreationDiagnostic = {
+      stage: "native_create",
+      classification: "native_rejected_before_mutation",
+      receiverCountBefore: 1,
+      receiverCountAfter: 1,
+      nativeError: { class: "Error", category: "NATIVE_OPERATION_REJECTED" }
+    };
+    const headers = { origin: "http://localhost:5173", authorization: `Bearer ${token}`, "content-type": "application/json" };
+    const missingPathId = await fetch(`${origin}/v1/receive-paths`, {
+      method: "POST", headers, body: JSON.stringify({ sourceChain: "arbitrum", allowRemoteLightwalletd: true })
+    });
+    expect(missingPathId.status).toBe(400);
+    const response = await fetch(`${origin}/v1/receive-paths`, {
+      method: "POST", headers, body: JSON.stringify({ sourceChain: "arbitrum", pathId: "839138ae-3d5b-4e8f-b811-8f66f2fb3191", allowRemoteLightwalletd: true })
+    });
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: "ZINGO_RECEIVER_CREATION_FAILED_NO_CHANGE",
+      receiverCreation: {
+        stage: "native_create",
+        classification: "native_rejected_before_mutation",
+        receiverCountBefore: 1,
+        receiverCountAfter: 1,
+        nativeError: { class: "Error", category: "NATIVE_OPERATION_REJECTED" }
+      }
+    });
+  });
+
+  it("requires explicit confirmation to reconcile one unregistered receiver", async () => {
+    await startServer();
+    const headers = { origin: "http://localhost:5173", authorization: `Bearer ${token}`, "content-type": "application/json" };
+    const missingConfirmation = await fetch(`${origin}/v1/receive-paths/reconcile`, {
+      method: "POST", headers, body: JSON.stringify({ sourceChain: "base", allowRemoteLightwalletd: true })
+    });
+    expect(missingConfirmation.status).toBe(400);
+    const unsupportedSource = await fetch(`${origin}/v1/receive-paths/reconcile`, {
+      method: "POST", headers, body: JSON.stringify({ sourceChain: "optimism", confirmSoleUnregistered: true, allowRemoteLightwalletd: true })
+    });
+    expect(unsupportedSource.status).toBe(400);
+    const confirmed = await fetch(`${origin}/v1/receive-paths/reconcile`, {
+      method: "POST", headers, body: JSON.stringify({ sourceChain: "base", confirmSoleUnregistered: true, allowRemoteLightwalletd: true })
+    });
+    expect(confirmed.status).toBe(201);
+    expect(await confirmed.json()).toMatchObject({ pathId: "a39138ae-3d5b-4e8f-b811-8f66f2fb3191", sourceChain: "base" });
   });
 
   it("keeps health public for the local UI while protecting wallet capabilities", async () => {

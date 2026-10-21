@@ -7,7 +7,8 @@ import type { AgentConfig } from "../config.js";
 import { AgentError } from "../errors.js";
 import type { ZcashWalletProvider } from "../wallet-provider.js";
 
-const receiveSchema = z.object({ sourceChain: z.enum(["base", "arbitrum"]) }).strict();
+const receiveSchema = z.object({ sourceChain: z.enum(["base", "arbitrum"]), pathId: z.string().uuid() }).strict();
+const reconcileReceiveSchema = z.object({ sourceChain: z.enum(["base", "arbitrum"]), confirmSoleUnregistered: z.literal(true), allowRemoteLightwalletd: z.literal(true) }).strict();
 const consentSchema = z.object({ allowRemoteLightwalletd: z.literal(true) }).strict();
 const shieldSchema = z.object({ scope: z.literal("all_eligible_transparent"), allowRemoteLightwalletd: z.literal(true) }).strict();
 const approveShieldSchema = z.object({ confirm: z.literal(true), preparationHash: z.string().regex(/^[0-9a-f]{64}$/), allowRemoteLightwalletd: z.literal(true) }).strict();
@@ -55,7 +56,12 @@ function parseBody<T>(schema: z.ZodType<T>, input: unknown): T {
 
 const errorHandler: ErrorRequestHandler = (error: unknown, _request, response, next) => {
   if (response.headersSent) return next(error);
-  if (error instanceof AgentError) return response.status(error.statusCode).json({ error: error.code });
+  if (error instanceof AgentError) {
+    return response.status(error.statusCode).json({
+      error: error.code,
+      ...(error.receiverCreationDiagnostic ? { receiverCreation: error.receiverCreationDiagnostic } : {})
+    });
+  }
   if (typeof error === "object" && error !== null && "type" in error) {
     const type = (error as { type?: unknown }).type;
     if (type === "entity.parse.failed") return response.status(400).json({ error: "INVALID_JSON" });
@@ -76,6 +82,10 @@ export function createAgentApp(config: AgentConfig, provider: ZcashWalletProvide
   app.use(requireAgentToken(config.accessToken));
 
   app.get("/v1/capabilities", async (_request, response) => response.json(await provider.getCapabilities()));
+  app.post("/v1/wallet/diagnostics", async (request, response) => {
+    const body = parseBody(consentSchema, request.body);
+    response.json(await provider.getWalletDiagnostics(body.allowRemoteLightwalletd));
+  });
   app.post("/v1/wallet/open", async (request, response) => {
     const body = parseBody(consentSchema, request.body);
     response.json(await provider.openWallet(body.allowRemoteLightwalletd));
@@ -83,7 +93,11 @@ export function createAgentApp(config: AgentConfig, provider: ZcashWalletProvide
   app.get("/v1/receive-paths", async (_request, response) => response.json(await provider.listReceivePaths()));
   app.post("/v1/receive-paths", async (request, response) => {
     const body = parseBody(receiveSchema.extend({ allowRemoteLightwalletd: z.literal(true) }).strict(), request.body);
-    response.status(201).json(await provider.createReceivePath(body.sourceChain, body.allowRemoteLightwalletd));
+    response.status(201).json(await provider.createReceivePath(body.sourceChain, body.pathId, body.allowRemoteLightwalletd));
+  });
+  app.post("/v1/receive-paths/reconcile", async (request, response) => {
+    const body = parseBody(reconcileReceiveSchema, request.body);
+    response.status(201).json(await provider.reconcileSoleUnregisteredReceivePath(body.sourceChain, body.confirmSoleUnregistered, body.allowRemoteLightwalletd));
   });
   app.post("/v1/receive-paths/:pathId/status", async (request, response) => {
     const pathId = parseBody(z.string().uuid(), request.params.pathId);

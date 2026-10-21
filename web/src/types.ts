@@ -109,6 +109,7 @@ export type AgentCapabilities = {
   verification: "not_configured" | "native_runtime_loaded_wallet_unverified" | "wallet_open_runtime_unverified";
   walletOpen: boolean;
   canGenerateTransparentReceiver: boolean;
+  receiverCreationBlocker: string | null;
   canMonitorReceiver: boolean;
   canGenerateIronwoodReceiver: false;
   canPrepareShielding: boolean;
@@ -120,7 +121,21 @@ export type AgentCapabilities = {
   limitations: string[];
 };
 
-export type AgentPath = { pathId: string; address: string; sourceChain: ChainKey; accountId: 0; receiverType: "transparent_p2pkh"; generatedAt: string };
+export type AgentPath = {
+  pathId: string;
+  address: string;
+  sourceChain: ChainKey;
+  accountId: 0;
+  receiverType: "transparent_p2pkh";
+  generatedAt: string;
+  creationDiagnostic?: {
+    stage: "inventory_before" | "native_create" | "inventory_after" | "response_parse" | "manifest_registration" | "wallet_save" | "manifest_write" | "complete";
+    classification: "native_rejected_before_mutation" | "receiver_created_response_parse_failed" | "manifest_registration_failed" | "unknown_failure" | "native_rejected_after_mutation_reconciled" | "success";
+    receiverCountBefore: number | null;
+    receiverCountAfter: number | null;
+    nativeError?: { class: "Error" | "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError" | "NativeError"; category: "LIGHTWALLETD_NOT_INITIALIZED" | "WALLET_STATE_LOCKED" | "NATIVE_OPERATION_REJECTED"; code?: string };
+  };
+};
 
 export type AgentShieldPreparation = {
   preparationId: string;

@@ -6,17 +6,20 @@ import {
   checkAgentPath,
   checkAgentShield,
   approveAgentShield,
+  assessArbitrumReceiverRetry,
   createAgentPath,
   createJob,
   createQuote,
   formatBaseUnits,
   getAgentCapabilities,
+  getAgentWalletDiagnostics,
   getApiHealth,
   getJob,
   listAgentPaths,
   openAgentWallet,
   prepareAgentShield,
   prepareAuthorization,
+  reconcileAgentPath,
   scanBalances,
   shortAddress,
   submitAuthorization,
@@ -24,6 +27,7 @@ import {
 } from "./api";
 import { chainMetadata } from "./wagmi";
 import type { AgentCapabilities, AgentPath, AgentShieldPreparation, AgentShieldStatus, AuthorizationEnvelope, ChainBalance, ChainKey, RescueJob, RescueLeg, ScanResult } from "./types";
+import type { AgentWalletDiagnostics } from "./api";
 
 type PendingSignatures = { signature: `0x${string}`; routeSignature: `0x${string}`; expiresAt: number };
 
@@ -134,6 +138,8 @@ function App() {
   const [agentOnline, setAgentOnline] = useState<boolean | null>(null);
   const [agentToken, setAgentToken] = useState("");
   const [agentCapabilities, setAgentCapabilities] = useState<AgentCapabilities | null>(null);
+  const [agentDiagnostics, setAgentDiagnostics] = useState<AgentWalletDiagnostics | null>(null);
+  const [agentDiagnosticsError, setAgentDiagnosticsError] = useState<string | null>(null);
   const [agentPaths, setAgentPaths] = useState<Partial<Record<ChainKey, AgentPath>>>({});
   const [agentPathStatuses, setAgentPathStatuses] = useState<Partial<Record<ChainKey, string>>>({});
   const [agentShieldPlan, setAgentShieldPlan] = useState<AgentShieldPreparation | null>(null);
@@ -145,12 +151,16 @@ function App() {
   const [confirmChain, setConfirmChain] = useState<ChainKey | null>(null);
   const [nowMs, setNowMs] = useState(Date.now());
   const idempotencyRef = useRef(crypto.randomUUID());
+  const receiverPathRequestIds = useRef<Partial<Record<ChainKey, string>>>({});
 
   const refundValid = useMemo(() => isCleanAddress(refundAddress.trim(), address), [refundAddress, address]);
   const selectedAvailable = useMemo(() => (scan?.chains ?? []).filter((item) => selected.includes(item.chainKey) && item.status === "available" && BigInt(item.balanceBaseUnits) > 0n), [scan, selected]);
   const shouldPoll = Boolean(job?.legs.some((leg) => ["submitted", "source_confirmed", "converting", "under_review", "needs_review"].includes(leg.status)));
   const activeLegForConfirmation = confirmChain ? legFor(job, confirmChain) : undefined;
   const agentShieldExpired = agentShieldPlan ? Date.parse(agentShieldPlan.expiresAt) <= nowMs : false;
+  const arbitrumRetry = agentDiagnostics
+    ? assessArbitrumReceiverRetry(agentDiagnostics, agentCapabilities?.canGenerateTransparentReceiver === true, agentCapabilities?.receiverCreationBlocker ?? null)
+    : { safe: false, reason: "Run read-only wallet diagnostics before attempting Arbitrum receiver creation." };
 
   useEffect(() => {
     let cancelled = false;
@@ -254,6 +264,8 @@ function App() {
 
   async function handleAgentConnect() {
     await runAction("agent", async () => {
+      setAgentDiagnostics(null);
+      setAgentDiagnosticsError(null);
       const health = await checkAgentHealth();
       setAgentOnline(health.status === "ok" && health.network === "mainnet");
       if (!agentToken.trim()) throw new Error("Enter the local companion token from its terminal. It stays in this browser tab and is never sent to the hosted API.");
@@ -271,8 +283,26 @@ function App() {
     });
   }
 
+  async function handleAgentDiagnostics() {
+    setAgentDiagnostics(null);
+    setAgentDiagnosticsError(null);
+    await runAction("agent-diagnostics", async () => {
+      if (!allowRemoteLightwalletd) throw new Error("Allow this read-only wallet status check first. It contacts the configured remote lightwalletd service.");
+      try {
+        const diagnostics = await getAgentWalletDiagnostics(agentToken.trim(), true);
+        setAgentDiagnostics(diagnostics);
+        setNotice("Read-only wallet diagnostics completed. No receiver was generated and no transaction was prepared.");
+      } catch (caught) {
+        setAgentDiagnosticsError("Read-only diagnostics could not be loaded. Check the page error and local agent status before retrying.");
+        throw caught;
+      }
+    });
+  }
+
   async function handleAgentOpenWallet() {
     await runAction("agent-open-wallet", async () => {
+      setAgentDiagnostics(null);
+      setAgentDiagnosticsError(null);
       if (!agentToken.trim()) throw new Error("Enter the local companion token from its terminal.");
       if (!allowRemoteLightwalletd) throw new Error("Allow remote lightwalletd access first. It can observe this device’s IP and wallet scan queries.");
       const caps = await openAgentWallet(agentToken.trim(), true);
@@ -288,13 +318,35 @@ function App() {
   async function handleAgentPath(chain: ChainKey) {
     await runAction(`agent-path-${chain}`, async () => {
       if (!agentCapabilities?.canGenerateTransparentReceiver) {
-        throw new Error("Open the existing wallet through the local companion first. No receiver has been generated.");
+        throw new Error(agentCapabilities?.receiverCreationBlocker ?? "Open the existing wallet through the local companion first. No receiver has been generated.");
       }
       if (!allowRemoteLightwalletd) throw new Error("Allow remote lightwalletd access first. It can observe this device’s IP and wallet scan queries.");
-      const path = await createAgentPath(agentToken.trim(), chain, true);
+      const pathId = receiverPathRequestIds.current[chain] ??= crypto.randomUUID();
+      const path = await createAgentPath(agentToken.trim(), chain, pathId, true);
+      delete receiverPathRequestIds.current[chain];
+      setAgentDiagnostics(null);
+      setAgentDiagnosticsError(null);
       setAgentPaths((current) => ({ ...current, [chain]: path }));
       setReceivers((current) => ({ ...current, [chain]: path.address }));
-      setAgentPathStatuses((current) => ({ ...current, [chain]: "Receiver created locally; incoming status not checked." }));
+      const diagnostic = path.creationDiagnostic;
+      const status = !diagnostic || diagnostic.classification === "success"
+        ? "Receiver created locally; incoming status not checked."
+        : `Receiver reconciled with diagnostic ${diagnostic.classification}; inventory ${diagnostic.receiverCountBefore ?? "?"} → ${diagnostic.receiverCountAfter ?? "?"}.`;
+      setAgentPathStatuses((current) => ({ ...current, [chain]: status }));
+    });
+  }
+
+  async function handleAgentReconcileBase() {
+    await runAction("agent-reconcile-base", async () => {
+      if (!allowRemoteLightwalletd) throw new Error("Allow this local wallet check first. It contacts the configured remote lightwalletd service.");
+      if (!agentDiagnostics?.reconciliationSupported || agentDiagnostics.receiverCount !== 1 || agentDiagnostics.unregisteredReceiverCount !== 1 || agentDiagnostics.registeredChains.includes("base")) {
+        throw new Error("The wallet no longer has exactly one unregistered receiver matching the reviewed Base recovery state. Refresh diagnostics before continuing.");
+      }
+      const path = await reconcileAgentPath(agentToken.trim(), "base", true);
+      setAgentPaths((current) => ({ ...current, base: path }));
+      setReceivers((current) => ({ ...current, base: path.address }));
+      setAgentDiagnostics(null);
+      setNotice("The existing unregistered receiver was assigned to Base locally. No new receiver was generated and no funds moved.");
     });
   }
 
@@ -511,6 +563,7 @@ function App() {
   }
 
   const step = currentStep(isConnected, Boolean(scan), Boolean(job));
+  const registeredPathFor = (chain: ChainKey) => agentDiagnostics?.registeredMappings.find((mapping) => mapping.sourceChain === chain);
 
   return <div className="app-shell">
     <header className="topbar">
@@ -593,17 +646,48 @@ function App() {
           <section className="side-card safety-card"><span className="side-card-icon"><Icon name="shield" size={20} /></span><span className="eyebrow">YOUR SAFETY, FIRST</span><h3>What ZecRescue never asks for</h3><ul><li><Icon name="check" size={14} /> Seed phrase</li><li><Icon name="check" size={14} /> Private key</li><li><Icon name="check" size={14} /> ETH in the compromised wallet</li></ul><div className="side-separator" /><p>The relayer pays native gas. The wallet owner signs the exact amount and route. No one can guarantee beating an attacker to the funds.</p></section>
 
           <section className="side-card agent-card"><div className="agent-card-header"><span className="local-icon">⌂</span><div><span className="eyebrow">LOCAL COMPANION</span><h3>Zcash light wallet</h3></div></div>
-            <div className="agent-status-row"><span className={`agent-light ${agentOnline ? "is-online" : agentOnline === false ? "is-offline" : ""}`} />{agentOnline ? "Agent reachable on this device" : agentOnline === false ? "Agent not reachable" : "Not connected"}</div>
+            <div className="agent-status-row"><span className={`agent-light ${agentOnline ? "is-online" : agentOnline === false ? "is-offline" : ""}`} />{agentOnline ? "Agent connected on this device" : agentOnline === false ? "Agent disconnected" : "Not connected"}</div>
             {!agentOnline && <button type="button" className="button button-secondary button-wide" onClick={() => void runAction("agent-health", async () => { const health = await checkAgentHealth(); setAgentOnline(health.status === "ok" && health.network === "mainnet"); })} disabled={Boolean(busyAction)}>Check local agent</button>}
             {agentOnline && <>
               <label className="agent-token-label" htmlFor="agent-token">Local session token</label>
               <input id="agent-token" type="password" autoComplete="off" placeholder="From the local agent terminal" value={agentToken} onChange={(event) => setAgentToken(event.target.value)} />
               <button type="button" className="button button-secondary button-wide" onClick={() => void handleAgentConnect()} disabled={Boolean(busyAction) || !agentToken.trim()}>{busyAction === "agent" ? "Checking capabilities…" : "Check wallet capabilities"}</button>
+              {agentCapabilities?.walletOpen && <button type="button" className="button button-secondary button-wide" onClick={() => void handleAgentDiagnostics()} disabled={Boolean(busyAction) || !agentToken.trim() || !allowRemoteLightwalletd}>{busyAction === "agent-diagnostics" ? "Reading wallet status…" : "Read-only wallet diagnostics"}</button>}
               <label className="agent-sync-consent"><input type="checkbox" checked={allowRemoteLightwalletd} onChange={(event) => setAllowRemoteLightwalletd(event.target.checked)} /><span>Allow this local session to connect to the configured remote lightwalletd for wallet opening, syncing, receiver checks, and shielding status. It may observe this device’s IP and wallet scan queries; Zcash keys stay local. When using the hosted app, your browser may also ask permission to connect to this device’s local agent.</span></label>
             </>}
-            {agentCapabilities && <div className={`capability-note ${agentCapabilities.canGenerateTransparentReceiver ? "source-reviewed" : "blocked"}`}><strong>{agentCapabilities.walletOpen ? `Zingo PC ${agentCapabilities.zingoVersion ?? "runtime"} connected locally` : "Local wallet not open"}</strong><p>{agentCapabilities.limitations[0] ?? "Wallet operations are local. Review each action before continuing."}</p></div>}
+            {agentOnline && !agentCapabilities && <div className="capability-note source-reviewed"><strong>Agent connected · wallet status not checked</strong><p>Check wallet capabilities to confirm whether the local wallet is open.</p></div>}
+            {agentCapabilities && <div className={`capability-note ${agentCapabilities.walletOpen ? "verified" : "blocked"}`}><strong>{agentCapabilities.walletOpen ? `Wallet open · Zingo PC ${agentCapabilities.zingoVersion ?? "runtime"}` : "Wallet closed"}</strong><p>{agentCapabilities.limitations[0] ?? (agentCapabilities.walletOpen ? "The wallet is open locally. Read-only diagnostics can check sync and receiver mappings." : "Open the existing Recovery Vault wallet after granting session consent.")}</p></div>}
+            {busyAction === "agent-diagnostics" && <div className="diagnostics-loading" role="status"><span className="loading-dot" /> Reading wallet status and local receiver mappings…</div>}
+            {agentDiagnosticsError && <div className="diagnostics-error" role="alert"><strong>Diagnostics unavailable</strong><p>{agentDiagnosticsError}</p></div>}
+            {agentCapabilities?.walletOpen && !agentDiagnostics && busyAction !== "agent-diagnostics" && !agentDiagnosticsError && <div className="diagnostic-verdict is-blocked"><strong>ARBITRUM RECEIVER RETRY: NOT SAFE</strong><p>{arbitrumRetry.reason}</p></div>}
+            {agentDiagnostics && <section className="agent-diagnostics" aria-labelledby="agent-diagnostics-title" aria-live="polite">
+              <div className="diagnostics-heading"><div><span className="eyebrow">READ ONLY</span><h4 id="agent-diagnostics-title">Wallet diagnostics</h4></div><span className="diagnostics-network">Mainnet</span></div>
+              <dl className="diagnostics-grid">
+                <div><dt>Network</dt><dd>{agentDiagnostics.network === "mainnet" ? "Mainnet" : "Unknown"}</dd></div>
+                <div><dt>Wallet type</dt><dd>{agentDiagnostics.walletType}</dd></div>
+                <div><dt>Wallet height</dt><dd>{agentDiagnostics.sync.walletHeight.toLocaleString()}</dd></div>
+                <div><dt>Lightwalletd height</dt><dd>{agentDiagnostics.sync.serverHeight.toLocaleString()}</dd></div>
+                <div className="diagnostic-sync"><dt>Sync state</dt><dd>{agentDiagnostics.sync.state === "at_tip_sync_active" ? "At tip · sync active" : agentDiagnostics.sync.state.replaceAll("_", " ")}</dd><small>Task {agentDiagnostics.sync.taskState} · {agentDiagnostics.sync.heightRelation.replaceAll("_", " ")}</small></div>
+                <div><dt>Transparent receivers</dt><dd>{agentDiagnostics.receiverCount}</dd></div>
+                <div><dt>Unregistered receivers</dt><dd>{agentDiagnostics.unregisteredReceiverCount}</dd></div>
+                <div><dt>Base mapped</dt><dd>{agentDiagnostics.registeredMappings.some((mapping) => mapping.sourceChain === "base") ? "Yes" : "No"}</dd></div>
+                <div><dt>Arbitrum mapped</dt><dd>{agentDiagnostics.registeredMappings.some((mapping) => mapping.sourceChain === "arbitrum") ? "Yes" : "No"}</dd></div>
+              </dl>
+              <div className="diagnostic-mappings"><strong>Registered chains and paths</strong>{agentDiagnostics.registeredMappings.length
+                ? <ul>{agentDiagnostics.registeredMappings.map((mapping) => <li key={`${mapping.sourceChain}:${mapping.pathId}`}><span>{chainMetadata[mapping.sourceChain].name}</span><code>{mapping.pathId}</code></li>)}</ul>
+                : <p>No registered receiver paths are recorded.</p>}</div>
+              <div className={`diagnostic-verdict ${arbitrumRetry.safe ? "is-safe" : "is-blocked"}`}>
+                <strong>ARBITRUM RECEIVER RETRY: {arbitrumRetry.safe ? "SAFE" : "NOT SAFE"}</strong>
+                <p>{arbitrumRetry.reason}</p>
+              </div>
+            </section>}
+            {agentDiagnostics?.reconciliationSupported && agentDiagnostics.receiverCount === 1 && agentDiagnostics.unregisteredReceiverCount === 1 && !agentDiagnostics.registeredChains.includes("base") && <div className="capability-note blocked"><strong>One unregistered receiver is available to reconcile</strong><p>This local action records the sole existing receiver under Base. It does not generate an address or move funds.</p><button type="button" className="button button-secondary button-wide" onClick={() => void handleAgentReconcileBase()} disabled={Boolean(busyAction) || !allowRemoteLightwalletd}>{busyAction === "agent-reconcile-base" ? "Recording Base mapping…" : "Reconcile existing receiver as Base"}</button></div>}
             {agentOnline && agentCapabilities && !agentCapabilities.walletOpen && <button type="button" className="button button-secondary button-wide" onClick={() => void handleAgentOpenWallet()} disabled={Boolean(busyAction) || !allowRemoteLightwalletd || !agentToken.trim()}>{busyAction === "agent-open-wallet" ? "Opening local wallet…" : "Open existing Recovery Vault wallet"}</button>}
-            {agentCapabilities?.canGenerateTransparentReceiver && <div className="agent-tools">{chainKeys.map((chain) => <button type="button" className="agent-path-button" key={chain} disabled={Boolean(busyAction) || Boolean(agentPaths[chain])} onClick={() => void handleAgentPath(chain)}>{agentPaths[chain] ? `${chainMetadata[chain].name} path ready` : `Create ${chainMetadata[chain].name} receiver`}</button>)}</div>}
+            {agentCapabilities?.canGenerateTransparentReceiver && <div className="agent-tools">{chainKeys.map((chain) => {
+              const alreadyMapped = Boolean(agentPaths[chain] || registeredPathFor(chain));
+              const allowed = chain !== "arbitrum" || arbitrumRetry.safe;
+              return <button type="button" className={`agent-path-button ${alreadyMapped ? "path-ready" : ""}`} key={chain} disabled={Boolean(busyAction) || alreadyMapped || !allowed} onClick={() => void handleAgentPath(chain)}>{alreadyMapped ? `${chainMetadata[chain].name} path ready` : chain === "arbitrum" && !allowed ? "Run diagnostics before Arbitrum receiver" : `Create ${chainMetadata[chain].name} receiver`}</button>;
+            })}</div>}
             {agentCapabilities?.canPrepareShielding && <div className="agent-shield-tools">
               <strong>Account-level transparent → Ironwood shield</strong>
               <p>{agentCapabilities.privacyDisclosure}</p>

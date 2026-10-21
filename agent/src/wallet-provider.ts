@@ -1,3 +1,5 @@
+import type { ReceiverCreationDiagnostic } from "./errors.js";
+
 export type SourceChain = "base" | "arbitrum";
 
 export type AgentCapabilities = {
@@ -8,6 +10,7 @@ export type AgentCapabilities = {
   verification: "not_configured" | "native_runtime_loaded_wallet_unverified" | "wallet_open_runtime_unverified";
   walletOpen: boolean;
   canGenerateTransparentReceiver: boolean;
+  receiverCreationBlocker: string | null;
   canMonitorReceiver: boolean;
   canGenerateIronwoodReceiver: false;
   canPrepareShielding: boolean;
@@ -26,6 +29,8 @@ export type ReceivePath = {
   accountId: 0;
   receiverType: "transparent_p2pkh";
   generatedAt: string;
+  /** Present only on a newly-created response; never persisted in the local path manifest. */
+  creationDiagnostic?: ReceiverCreationDiagnostic;
 };
 
 export type ReceiveStatus = {
@@ -36,6 +41,24 @@ export type ReceiveStatus = {
   walletHeight: number | null;
   serverHeight: number | null;
   syncedAt: string;
+};
+
+export type WalletDiagnostics = {
+  network: "mainnet";
+  walletType: string;
+  reconciliationSupported: true;
+  sync: {
+    state: "catching_up" | "at_tip_sync_active" | "synced";
+    taskState: "active" | "idle";
+    heightRelation: "behind" | "at_tip_or_ahead";
+    walletHeight: number;
+    serverHeight: number;
+  };
+  receivers: Array<{
+    address: string;
+    pathId: string | null;
+    sourceChain: SourceChain | null;
+  }>;
 };
 
 export type ChainTransparentAmount = {
@@ -78,8 +101,10 @@ export type ShieldStatus = {
 export interface ZcashWalletProvider {
   getCapabilities(): Promise<AgentCapabilities>;
   openWallet(allowRemoteLightwalletd: true): Promise<AgentCapabilities>;
+  getWalletDiagnostics(allowRemoteLightwalletd: true): Promise<WalletDiagnostics>;
   listReceivePaths(): Promise<ReceivePath[]>;
-  createReceivePath(sourceChain: SourceChain, allowRemoteLightwalletd: true): Promise<ReceivePath>;
+  createReceivePath(sourceChain: SourceChain, pathId: string, allowRemoteLightwalletd: true): Promise<ReceivePath>;
+  reconcileSoleUnregisteredReceivePath(sourceChain: SourceChain, confirmSoleUnregistered: true, allowRemoteLightwalletd: true): Promise<ReceivePath>;
   getReceiveStatus(pathId: string, allowRemoteLightwalletd: true): Promise<ReceiveStatus>;
   prepareShielding(scope: "all_eligible_transparent", allowRemoteLightwalletd: true): Promise<ShieldPreparation>;
   approveShielding(preparationId: string, preparationHash: string, allowRemoteLightwalletd: true): Promise<ShieldSubmission>;

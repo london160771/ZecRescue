@@ -32,7 +32,10 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
       const code = typeof payload === "object" && payload !== null && "error" in payload && typeof payload.error === "string"
         ? payload.error
         : `HTTP_${response.status}`;
-      throw new Error(code);
+      const diagnostic = typeof payload === "object" && payload !== null && "receiverCreation" in payload
+        ? formatReceiverCreationDiagnostic(payload.receiverCreation)
+        : null;
+      throw new Error(diagnostic ? `${code}; ${diagnostic}` : code);
     }
     return payload as T;
   } catch (error) {
@@ -114,6 +117,110 @@ export async function getAgentCapabilities(token: string): Promise<AgentCapabili
   return requestJson(agent("/v1/capabilities"), { headers: { Authorization: `Bearer ${token}` } });
 }
 
+export type AgentWalletDiagnostics = {
+  network: "mainnet";
+  walletType: string;
+  reconciliationSupported: boolean;
+  sync: {
+    state: "catching_up" | "at_tip_sync_active" | "synced";
+    taskState: "active" | "idle";
+    heightRelation: "behind" | "at_tip_or_ahead";
+    walletHeight: number;
+    serverHeight: number;
+  };
+  receiverCount: number;
+  unregisteredReceiverCount: number;
+  registeredChains: ChainKey[];
+  registeredMappings: Array<{ sourceChain: ChainKey; pathId: string }>;
+};
+
+export function assessArbitrumReceiverRetry(
+  diagnostics: AgentWalletDiagnostics,
+  canGenerateReceiver: boolean,
+  receiverCreationBlocker: string | null = null
+): { safe: boolean; reason: string } {
+  if (!canGenerateReceiver) return { safe: false, reason: receiverCreationBlocker ?? "The local agent does not currently report receiver creation as available." };
+  if (diagnostics.network !== "mainnet") return { safe: false, reason: "The wallet diagnostics do not confirm Zcash Mainnet." };
+  if (diagnostics.walletType !== "Loaded from seed or mnemonic phrase") {
+    return { safe: false, reason: "The wallet type is not the verified seed-backed Recovery Vault type." };
+  }
+
+  const atReportedTip = diagnostics.sync.state === "synced"
+    || (diagnostics.sync.state === "at_tip_sync_active"
+      && diagnostics.sync.taskState === "active"
+      && diagnostics.sync.heightRelation === "at_tip_or_ahead"
+      && diagnostics.sync.walletHeight >= diagnostics.sync.serverHeight);
+  if (!atReportedTip) return { safe: false, reason: "Wallet sync is still catching up or its reported heights are inconsistent." };
+  if (diagnostics.unregisteredReceiverCount !== 0) {
+    return { safe: false, reason: "At least one existing receiver is unregistered. Reconcile it before creating another." };
+  }
+  if (diagnostics.receiverCount !== diagnostics.registeredMappings.length) {
+    return { safe: false, reason: "Receiver inventory and registered path mappings do not match." };
+  }
+
+  const baseMappings = diagnostics.registeredMappings.filter((mapping) => mapping.sourceChain === "base");
+  const arbitrumMappings = diagnostics.registeredMappings.filter((mapping) => mapping.sourceChain === "arbitrum");
+  if (baseMappings.length !== 1) return { safe: false, reason: "Diagnostics must show exactly one registered Base receiver before this retry." };
+  if (arbitrumMappings.length > 0) return { safe: false, reason: "An Arbitrum receiver is already registered; creating another could add an unnecessary address." };
+  if (new Set(diagnostics.registeredMappings.map((mapping) => mapping.pathId)).size !== diagnostics.registeredMappings.length) {
+    return { safe: false, reason: "Two registered chains point to the same local path ID." };
+  }
+
+  const syncNote = diagnostics.sync.state === "at_tip_sync_active"
+    ? " The wallet is at the reported lightwalletd tip while background sync remains active."
+    : " The wallet reports synced status.";
+  return {
+    safe: true,
+    reason: `One Arbitrum receiver attempt is safe: Base has exactly one registered path, Arbitrum has none, and all ${diagnostics.receiverCount} receiver(s) are registered.${syncNote}`
+  };
+}
+
+function formatReceiverCreationDiagnostic(value: unknown): string | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const stages = new Set(["inventory_before", "native_create", "inventory_after", "response_parse", "manifest_registration", "wallet_save", "manifest_write", "complete"]);
+  const classifications = new Set(["native_rejected_before_mutation", "receiver_created_response_parse_failed", "manifest_registration_failed", "unknown_failure", "native_rejected_after_mutation_reconciled", "success"]);
+  const nativeClasses = new Set(["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "NativeError"]);
+  const nativeCategories = new Set(["LIGHTWALLETD_NOT_INITIALIZED", "WALLET_STATE_LOCKED", "NATIVE_OPERATION_REJECTED"]);
+  const count = (input: unknown): string => Number.isSafeInteger(input) && Number(input) >= 0 ? String(input) : "unknown";
+  if (typeof row.stage !== "string" || !stages.has(row.stage) || typeof row.classification !== "string" || !classifications.has(row.classification)) return null;
+  const native = typeof row.nativeError === "object" && row.nativeError !== null ? row.nativeError as Record<string, unknown> : null;
+  const nativeSuffix = native && typeof native.class === "string" && nativeClasses.has(native.class) && typeof native.category === "string" && nativeCategories.has(native.category)
+    ? `; native ${native.class}/${native.category}${typeof native.code === "string" && /^(?:ERR|NAPI)_[A-Z0-9_]{1,48}$/.test(native.code) ? `/${native.code}` : ""}`
+    : "";
+  return `receiver stage=${row.stage}, result=${row.classification}, inventory=${count(row.receiverCountBefore)}→${count(row.receiverCountAfter)}${nativeSuffix}`;
+}
+
+export async function getAgentWalletDiagnostics(token: string, allowRemoteLightwalletd: true): Promise<AgentWalletDiagnostics> {
+  const raw = await requestJson<{
+    network: "mainnet";
+    walletType: string;
+    reconciliationSupported?: true;
+    sync: AgentWalletDiagnostics["sync"];
+    receivers: Array<{ address: string; pathId: string | null; sourceChain: ChainKey | null }>;
+  }>(agent("/v1/wallet/diagnostics"), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ allowRemoteLightwalletd })
+  });
+  const receivers = Array.isArray(raw.receivers) ? raw.receivers : [];
+  const registeredMappings = receivers.flatMap((receiver) => {
+    const validChain = receiver.sourceChain === "base" || receiver.sourceChain === "arbitrum";
+    const validPathId = typeof receiver.pathId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(receiver.pathId);
+    return validChain && validPathId ? [{ sourceChain: receiver.sourceChain as ChainKey, pathId: receiver.pathId as string }] : [];
+  });
+  return {
+    network: raw.network,
+    walletType: raw.walletType,
+    reconciliationSupported: raw.reconciliationSupported === true,
+    sync: raw.sync,
+    receiverCount: receivers.length,
+    unregisteredReceiverCount: receivers.length - registeredMappings.length,
+    registeredChains: [...new Set(registeredMappings.map((mapping) => mapping.sourceChain))],
+    registeredMappings
+  };
+}
+
 export async function openAgentWallet(token: string, allowRemoteLightwalletd: true): Promise<AgentCapabilities> {
   return requestJson(agent("/v1/wallet/open"), {
     method: "POST",
@@ -126,11 +233,19 @@ export async function listAgentPaths(token: string): Promise<AgentPath[]> {
   return requestJson(agent("/v1/receive-paths"), { headers: { Authorization: `Bearer ${token}` } });
 }
 
-export async function createAgentPath(token: string, sourceChain: ChainKey, allowRemoteLightwalletd: true): Promise<AgentPath> {
+export async function createAgentPath(token: string, sourceChain: ChainKey, pathId: string, allowRemoteLightwalletd: true): Promise<AgentPath> {
   return requestJson(agent("/v1/receive-paths"), {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ sourceChain, allowRemoteLightwalletd })
+    body: JSON.stringify({ sourceChain, pathId, allowRemoteLightwalletd })
+  });
+}
+
+export async function reconcileAgentPath(token: string, sourceChain: ChainKey, allowRemoteLightwalletd: true): Promise<AgentPath> {
+  return requestJson(agent("/v1/receive-paths/reconcile"), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ sourceChain, confirmSoleUnregistered: true, allowRemoteLightwalletd })
   });
 }
 

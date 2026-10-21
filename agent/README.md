@@ -4,7 +4,7 @@ The local companion binds only to `127.0.0.1:4180`. It is separate from the host
 
 ## Runtime and local configuration
 
-The Phase 3 prototype supports the installed Zingo PC 2.0.26 Windows x64 native addon only. It pins both the reported Zingolib version (`zl_6.0.0_6d43e`) and the observed native binary SHA-256; a mismatch fails closed. This is an internal Zingo PC interface without a stable public SDK contract. No Rust toolchain, fork, Zebra, zecd, or full node is required.
+The Phase 3 prototype accepts only the separately reviewed Windows x64 native addon built from Zingo PC 2.0.26 source with the audited allow-gap patch. It pins the reported Zingolib version (`zl_7a542`) and binary SHA-256 (`7ea2565ddf4bcef90fc10e1a11efc355f5d1439f61d73229180db4c166d834d2`); any mismatch fails closed. The installed Zingo PC addon is not replaced. This remains an internal interface without a stable public SDK contract. No Rust toolchain, Zebra, zecd, or full node is required at runtime.
 
 Set the following in the ignored project-root `.env` only after identifying the existing Mainnet wallet you created in Zingo PC:
 
