@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isAddress } from "viem";
 import { useAccount, useConnect, useDisconnect, useSignTypedData, useSwitchChain } from "wagmi";
-import { runWithInvalidatedAgentDiagnostics } from "./agent-mutation.js";
+import { refreshAgentSafetyState, runWithInvalidatedAgentDiagnostics } from "./agent-mutation.js";
 import {
   checkAgentHealth,
   checkAgentPath,
@@ -71,12 +71,16 @@ const apiErrorCopy: Record<string, string> = {
   INVALID_REIMBURSEMENT_AMOUNT: "Enter a positive fixed USDC reimbursement with up to six decimals.",
   REFUND_ADDRESS_MUST_DIFFER_FROM_SOURCE: "The clean refund wallet must differ from the compromised wallet.",
   TRANSPARENT_MAINNET_ZCASH_RECIPIENT_REQUIRED: "Enter a valid Zcash mainnet transparent t1 receiver.",
+  RECEIVER_RESTART_REQUIRED_FOR_DURABILITY_VERIFICATION: "Receiver outcome is not finalized. Completely stop and restart the local agent in your terminal, pair with its new token, open the same existing wallet, refresh safety diagnostics, then verify the pending operation. Do not retry receiver creation.",
+  RECEIVER_OUTCOME_RECONCILIATION_REQUIRED: "Receiver creation is blocked by an unresolved operation. Refresh safety diagnostics and verify it only after a full agent process restart.",
+  RECEIVER_MUTATION_RESOLVED_NO_CHANGE: "The restarted agent verified that no new receiver persisted. No path was added. Refresh wallet diagnostics and capabilities before considering another action.",
+  AGENT_RESTART_REQUIRED_BEFORE_WALLET_REOPEN: "This process already initialized the wallet runtime. Completely stop and restart the agent before opening the wallet again.",
   LEG_STATE_CHANGED: "This chain leg changed while the request was in progress. Refresh status before continuing."
 };
 
 function messageFor(error: unknown): string {
   const code = error instanceof Error ? error.message : "UNEXPECTED_FAILURE";
-  return apiErrorCopy[code] ?? `The request did not complete (${code}). Check the status before retrying.`;
+  return apiErrorCopy[code.split(";")[0]!] ?? `The request did not complete (${code}). Check the status before retrying.`;
 }
 
 function isCleanAddress(value: string, source?: string): boolean {
@@ -286,19 +290,41 @@ function App() {
   }
 
   async function handleAgentDiagnostics() {
-    setAgentDiagnostics(null);
-    setAgentDiagnosticsError(null);
     await runAction("agent-diagnostics", async () => {
+      setReceiverDiagnosticsMustRefresh(true);
+      setAgentDiagnostics(null);
+      setAgentDiagnosticsError(null);
       if (!allowRemoteLightwalletd) throw new Error("Allow this read-only wallet status check first. It contacts the configured remote lightwalletd service.");
       try {
-        const diagnostics = await getAgentWalletDiagnostics(agentToken.trim(), true);
-        setAgentDiagnostics(diagnostics);
-        setReceiverDiagnosticsMustRefresh(false);
-        setNotice("Read-only wallet diagnostics completed. No receiver was generated and no transaction was prepared.");
+        await refreshAgentSafetyState(
+          () => { setReceiverDiagnosticsMustRefresh(true); setAgentDiagnostics(null); },
+          () => getAgentWalletDiagnostics(agentToken.trim(), true),
+          () => getAgentCapabilities(agentToken.trim()),
+          ({ diagnostics, capabilities }) => {
+            setAgentDiagnostics(diagnostics);
+            setAgentCapabilities(capabilities);
+            setReceiverDiagnosticsMustRefresh(false);
+          }
+        );
+        setNotice("Fresh wallet diagnostics and agent capabilities loaded. No receiver was generated and no transaction was prepared.");
       } catch (caught) {
-        setAgentDiagnosticsError("Read-only diagnostics could not be loaded. Check the page error and local agent status before retrying.");
+        setAgentDiagnosticsError("Safety refresh did not complete. Both diagnostics and capabilities must refresh before a receiver action.");
         throw caught;
       }
+    });
+  }
+
+  async function handleAgentResolvePending() {
+    await runAction("agent-resolve-pending", async () => {
+      const pending = agentDiagnostics?.pendingReceiverMutation;
+      if (receiverDiagnosticsMustRefresh || !pending || pending.requiresAgentRestart || !allowRemoteLightwalletd) throw new Error("Refresh safety diagnostics after fully restarting the agent before verifying this operation.");
+      const path = await runWithInvalidatedAgentDiagnostics(
+        () => { setReceiverDiagnosticsMustRefresh(true); setAgentDiagnostics(null); },
+        () => reconcileAgentPath(agentToken.trim(), pending.sourceChain, true, pending.pathId)
+      );
+      setAgentPaths((current) => ({ ...current, [path.sourceChain]: path }));
+      setReceivers((current) => ({ ...current, [path.sourceChain]: path.address }));
+      setNotice("The new agent session verified the saved receiver and recorded its original chain/path mapping. Refresh safety state to confirm the result.");
     });
   }
 
@@ -314,7 +340,7 @@ function App() {
       const byChain = Object.fromEntries(paths.map((path) => [path.sourceChain, path])) as Partial<Record<ChainKey, AgentPath>>;
       setAgentPaths(byChain);
       setReceivers((current) => ({ ...current, ...Object.fromEntries(paths.map((path) => [path.sourceChain, path.address])) }));
-      setNotice("The existing local Recovery Vault wallet is open and syncing through lightwalletd. Zingo PC must stay closed while the companion uses it.");
+      setNotice(caps.receiverCreationBlocker === "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" ? "The existing wallet is open for pending-operation verification. Sync is held until the saved receiver outcome is resolved. Refresh safety diagnostics." : "The existing local Recovery Vault wallet is open and syncing through lightwalletd. Zingo PC must stay closed while the companion uses it.");
     });
   }
 
@@ -690,7 +716,8 @@ function App() {
                 <p>{arbitrumRetry.reason}</p>
               </div>
             </section>}
-            {agentDiagnostics?.reconciliationSupported && agentDiagnostics.receiverCount === 1 && agentDiagnostics.unregisteredReceiverCount === 1 && !agentDiagnostics.registeredChains.includes("base") && <div className="capability-note blocked"><strong>One unregistered receiver is available to reconcile</strong><p>This local action records the sole existing receiver under Base. It does not generate an address or move funds.</p><button type="button" className="button button-secondary button-wide" onClick={() => void handleAgentReconcileBase()} disabled={Boolean(busyAction) || !allowRemoteLightwalletd}>{busyAction === "agent-reconcile-base" ? "Recording Base mapping…" : "Reconcile existing receiver as Base"}</button></div>}
+            {agentDiagnostics?.pendingReceiverMutation && <div className="capability-note blocked"><strong>Pending receiver operation · creation blocked</strong><p>{agentDiagnostics.pendingReceiverMutation.requiresAgentRestart ? "Completely stop and restart the local agent, pair again, open the same wallet, then refresh safety diagnostics. Do not retry creation." : "This new agent process can verify the saved wallet outcome. This action creates no receiver."}</p><button type="button" className="button button-secondary button-wide" onClick={() => void handleAgentResolvePending()} disabled={Boolean(busyAction) || receiverDiagnosticsMustRefresh || agentDiagnostics.pendingReceiverMutation.requiresAgentRestart || !allowRemoteLightwalletd}>Verify saved receiver outcome</button></div>}
+            {!agentDiagnostics?.pendingReceiverMutation && agentDiagnostics?.reconciliationSupported && agentDiagnostics.receiverCount === 1 && agentDiagnostics.unregisteredReceiverCount === 1 && !agentDiagnostics.registeredChains.includes("base") && <div className="capability-note blocked"><strong>One unregistered receiver is available to reconcile</strong><p>This local action records the sole existing receiver under Base. It does not generate an address or move funds.</p><button type="button" className="button button-secondary button-wide" onClick={() => void handleAgentReconcileBase()} disabled={Boolean(busyAction) || !allowRemoteLightwalletd}>{busyAction === "agent-reconcile-base" ? "Recording Base mapping…" : "Reconcile existing receiver as Base"}</button></div>}
             {agentOnline && agentCapabilities && !agentCapabilities.walletOpen && <button type="button" className="button button-secondary button-wide" onClick={() => void handleAgentOpenWallet()} disabled={Boolean(busyAction) || !allowRemoteLightwalletd || !agentToken.trim()}>{busyAction === "agent-open-wallet" ? "Opening local wallet…" : "Open existing Recovery Vault wallet"}</button>}
             {agentCapabilities?.canGenerateTransparentReceiver && <div className="agent-tools">{chainKeys.map((chain) => {
               const alreadyMapped = Boolean(agentPaths[chain] || registeredPathFor(chain));

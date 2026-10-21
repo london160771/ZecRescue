@@ -8,7 +8,7 @@ import { AgentError } from "../errors.js";
 import type { ZcashWalletProvider } from "../wallet-provider.js";
 
 const receiveSchema = z.object({ sourceChain: z.enum(["base", "arbitrum"]), pathId: z.string().uuid() }).strict();
-const reconcileReceiveSchema = z.object({ sourceChain: z.enum(["base", "arbitrum"]), confirmSoleUnregistered: z.literal(true), allowRemoteLightwalletd: z.literal(true) }).strict();
+const reconcileReceiveSchema = z.object({ sourceChain: z.enum(["base", "arbitrum"]), pathId: z.string().uuid().optional(), confirmSoleUnregistered: z.literal(true), allowRemoteLightwalletd: z.literal(true) }).strict();
 const consentSchema = z.object({ allowRemoteLightwalletd: z.literal(true) }).strict();
 const shieldSchema = z.object({ scope: z.literal("all_eligible_transparent"), allowRemoteLightwalletd: z.literal(true) }).strict();
 const approveShieldSchema = z.object({ confirm: z.literal(true), preparationHash: z.string().regex(/^[0-9a-f]{64}$/), allowRemoteLightwalletd: z.literal(true) }).strict();
@@ -97,7 +97,7 @@ export function createAgentApp(config: AgentConfig, provider: ZcashWalletProvide
   });
   app.post("/v1/receive-paths/reconcile", async (request, response) => {
     const body = parseBody(reconcileReceiveSchema, request.body);
-    response.status(201).json(await provider.reconcileSoleUnregisteredReceivePath(body.sourceChain, body.confirmSoleUnregistered, body.allowRemoteLightwalletd));
+    response.status(201).json(await provider.reconcileSoleUnregisteredReceivePath(body.sourceChain, body.confirmSoleUnregistered, body.allowRemoteLightwalletd, body.pathId));
   });
   app.post("/v1/receive-paths/:pathId/status", async (request, response) => {
     const pathId = parseBody(z.string().uuid(), request.params.pathId);

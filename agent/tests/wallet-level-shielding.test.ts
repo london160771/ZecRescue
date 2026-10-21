@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,8 @@ import { ZingoPcNativeWalletProvider, type ZingoNativeApi } from "../src/zingo-n
 import type { ReceivePath } from "../src/wallet-provider.js";
 
 const tempDirs: string[] = [];
+const completeSync = JSON.stringify({ sync_complete: { sync_start_height: 500, sync_end_height: 500, blocks_scanned: 0, sapling_outputs_scanned: 0, orchard_outputs_scanned: 0, ironwood_outputs_scanned: 0, percentage_total_outputs_scanned: 100 } });
+const restartCode = "RECEIVER_RESTART_REQUIRED_FOR_DURABILITY_VERIFICATION";
 const baseAddress = syntheticT1(7);
 const arbitrumAddress = syntheticT1(8);
 const unrelatedAddress = syntheticT1(9);
@@ -50,7 +52,9 @@ class FakeZingoNative implements ZingoNativeApi {
   saveFailure = false;
   walletHeight = 500;
   serverHeight = 500;
-  syncState = "sync task is complete";
+  syncState = completeSync;
+  syncLaunched = false;
+  completionConsumed = false;
   receiverCreateFailure: "none" | "before" | "after" = "none";
   malformedReceiverCreateResult = false;
   receiverCreateErrorMessage = "test native create failed";
@@ -73,9 +77,13 @@ class FakeZingoNative implements ZingoNativeApi {
     return JSON.stringify({ birthday: 1 });
   });
   wallet_kind = vi.fn(async () => JSON.stringify({ kind: this.walletKind }));
-  run_sync = vi.fn(async () => "started");
-  poll_sync = vi.fn(async () => this.syncState);
-  stop_sync = vi.fn(async () => { this.syncState = "sync task is complete"; return "stopped"; });
+  run_sync = vi.fn(async () => { this.syncLaunched = true; this.completionConsumed = false; return "Launching sync task..."; });
+  poll_sync = vi.fn(async () => {
+    if (!this.syncLaunched || this.completionConsumed) return "Sync task has not been launched.";
+    if (this.syncState === completeSync) this.completionConsumed = true;
+    return this.syncState;
+  });
+  stop_sync = vi.fn(async () => { this.syncState = completeSync; return this.completionConsumed ? "Sync already stopped." : "Stopping sync task..."; });
   deinitialize = vi.fn(async () => "OK");
   save_wallet_file = vi.fn(async () => {
     if (this.saveFailure) throw new Error("wallet save failed");
@@ -124,6 +132,8 @@ async function createHarness(options: {
   walletName?: string;
   stateDir?: string;
   native?: FakeZingoNative;
+  registeredChains?: Array<"base" | "arbitrum">;
+  agentSessionId?: string;
 } = {}) {
   const root = await mkdtemp(join(tmpdir(), "zecrescue-native-agent-"));
   tempDirs.push(root);
@@ -137,6 +147,12 @@ async function createHarness(options: {
   await mkdir(stateDir, { recursive: true });
   await writeFile(nativePath, "native runtime fixture");
   const native = options.native ?? new FakeZingoNative();
+  if (options.registeredChains) {
+    const paths: ReceivePath[] = options.registeredChains.map((sourceChain) => ({ sourceChain, pathId: sourceChain === "base" ? basePathId : arbitrumPathId, address: sourceChain === "base" ? baseAddress : arbitrumAddress, accountId: 0, receiverType: "transparent_p2pkh", generatedAt: new Date(0).toISOString() }));
+    native.addresses = paths.map((path) => path.address);
+    native.generatedCount = paths.length;
+    await writeFile(join(stateDir, ".zecrescue-agent-paths.json"), JSON.stringify(paths));
+  }
   const provider = new ZingoPcNativeWalletProvider({
     nativePath,
     walletBaseDir,
@@ -152,7 +168,8 @@ async function createHarness(options: {
       if (options.processCheckFails) throw new Error("process lookup failed");
       return options.isRunning ?? false;
     },
-    ...(options.now ? { now: options.now } : {})
+    ...(options.now ? { now: options.now } : {}),
+    ...(options.agentSessionId ? { agentSessionId: options.agentSessionId } : {})
   });
   return { provider, native, root, stateDir, walletBaseDir };
 }
@@ -171,10 +188,17 @@ async function readMutationIntent(stateDir: string): Promise<Record<string, unkn
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
 }
 
-async function registerBoth(provider: ZingoPcNativeWalletProvider): Promise<{ basePathId: string; arbitrumPathId: string }> {
-  const base = await createPath(provider, "base");
-  const arbitrum = await createPath(provider, "arbitrum");
-  return { basePathId: base.pathId, arbitrumPathId: arbitrum.pathId };
+type Harness = Awaited<ReturnType<typeof createHarness>>;
+async function nextSession(previous: Harness, inventory = previous.native.persistedAddresses, newProcess = true) {
+  const native = new FakeZingoNative();
+  native.addresses = [...inventory];
+  native.generatedCount = inventory.length;
+  const next = await createHarness({ native, walletBaseDir: previous.walletBaseDir, stateDir: previous.stateDir, ...(newProcess ? { agentSessionId: randomUUID() } : {}) });
+  await connect(next.provider);
+  return next;
+}
+async function resolve(harness: Harness, chain: "base" | "arbitrum") {
+  return harness.provider.reconcileSoleUnregisteredReceivePath(chain, true, true, chain === "base" ? basePathId : arbitrumPathId);
 }
 
 afterEach(async () => {
@@ -213,9 +237,9 @@ describe("Zingo PC native wallet boundary", () => {
   });
 
   it("reports read-only wallet type, sync tip, and registered/unregistered receiver inventory", async () => {
-    const { provider, native } = await createHarness();
+    const { provider, native } = await createHarness({ registeredChains: ["base"] });
     await connect(provider);
-    const base = await createPath(provider, "base");
+    const base = (await provider.listReceivePaths())[0]!;
 
     const diagnostics = await provider.getWalletDiagnostics(true);
 
@@ -223,12 +247,13 @@ describe("Zingo PC native wallet boundary", () => {
       network: "mainnet",
       walletType: "Loaded from seed or mnemonic phrase",
       reconciliationSupported: true,
+      pendingReceiverMutation: null,
       sync: { state: "synced", taskState: "idle", heightRelation: "at_tip_or_ahead", walletHeight: 500, serverHeight: 500 },
       receivers: [
         { address: base.address, pathId: base.pathId, sourceChain: "base" }
       ]
     });
-    expect(native.create_new_transparent_address).toHaveBeenCalledOnce();
+    expect(native.create_new_transparent_address).not.toHaveBeenCalled();
     expect(native.confirm).not.toHaveBeenCalled();
     expect(native.shield).not.toHaveBeenCalled();
   });
@@ -409,461 +434,352 @@ describe("Zingo PC native wallet boundary", () => {
     }
   });
 
-  it("creates distinct Base and Arbitrum receivers and persists only their local path metadata", async () => {
-    const { provider, native, stateDir } = await createHarness();
-    await connect(provider);
-    const base = await createPath(provider, "base");
-    const arbitrum = await createPath(provider, "arbitrum");
-    expect(base.address).not.toBe(arbitrum.address);
-    const status = await provider.getReceiveStatus(base.pathId, true);
-    expect(status).toMatchObject({ sourceChain: "base", amountZatoshis: "2000", state: "received" });
-    expect(native.get_spendable_balance_with_address).toHaveBeenCalledWith(base.address, "false");
-    await expect(provider.getReceiveStatus("00000000-0000-4000-8000-000000000000", true)).rejects.toMatchObject({ code: "RECEIVE_PATH_NOT_FOUND" });
-
-    const manifest = await readFile(join(stateDir, ".zecrescue-agent-paths.json"), "utf8");
-    expect(manifest).toContain('"sourceChain":"base"');
-    expect(manifest).toContain('"sourceChain":"arbitrum"');
-    expect(manifest).not.toMatch(/seed|private.?key|viewing.?key/i);
-    expect("get_seed" in native).toBe(false);
-    expect("get_ufvk" in native).toBe(false);
+  it("Session A calls the strict first method once and leaves mapping and intent unfinalized", async () => {
+    const h = await createHarness(); await connect(h.provider);
+    await expect(createPath(h.provider, "base")).rejects.toMatchObject({ code: restartCode });
+    expect(h.native.create_new_transparent_address).toHaveBeenCalledOnce();
+    expect(h.native.init_from_b64).toHaveBeenCalledOnce();
+    expect(h.native.deinitialize).not.toHaveBeenCalled();
+    expect(h.native.stop_sync).not.toHaveBeenCalled();
+    expect(await h.provider.listReceivePaths()).toEqual([]);
+    expect(await readMutationIntent(h.stateDir)).toMatchObject({ schemaVersion: 2, pathId: basePathId, sourceChain: "base", state: "restart_required_verify_outcome", expectedReceiverCount: 0, observedPostReceiverCount: 1 });
+    expect((await h.provider.getCapabilities()).receiverCreationBlocker).toBe("RECEIVER_OUTCOME_RECONCILIATION_REQUIRED");
   });
 
-  it("reconciles exactly one existing unregistered receiver without generating another", async () => {
-    const { provider, native, stateDir } = await createHarness();
-    native.addresses = [unrelatedAddress];
-    await connect(provider);
-
-    const path = await provider.reconcileSoleUnregisteredReceivePath("base", true, true);
-
-    expect(path).toMatchObject({ sourceChain: "base", address: unrelatedAddress, accountId: 0 });
-    expect(native.create_new_transparent_address).not.toHaveBeenCalled();
-    expect(native.save_wallet_file).toHaveBeenCalledOnce();
-    expect(native.deinitialize).toHaveBeenCalledOnce();
-    expect(native.init_from_b64).toHaveBeenCalledTimes(2);
-    const manifest = JSON.parse(await readFile(join(stateDir, ".zecrescue-agent-paths.json"), "utf8")) as ReceivePath[];
-    expect(manifest).toEqual([path]);
-  });
-
-  it("refuses to reconcile when more than one unregistered receiver exists", async () => {
-    const { provider, native } = await createHarness();
-    native.addresses = [unrelatedAddress, newAddress];
-    await connect(provider);
-
-    await expect(provider.reconcileSoleUnregisteredReceivePath("base", true, true)).rejects.toMatchObject({ code: "UNREGISTERED_RECEIVER_NOT_UNIQUE" });
-    expect(native.create_new_transparent_address).not.toHaveBeenCalled();
-  });
-
-  it("recovers and diagnoses a receiver when the native create call throws after adding it", async () => {
-    const { provider, native } = await createHarness();
-    await connect(provider);
-    native.generatedAddresses = [newAddress];
-    native.receiverCreateFailure = "after";
-
-    const path = await createPath(provider, "base");
-
-    expect(path).toMatchObject({
-      sourceChain: "base",
-      address: newAddress,
-      creationDiagnostic: {
-        stage: "native_create",
-        classification: "native_rejected_after_mutation_reconciled",
-        receiverCountBefore: 0,
-        receiverCountAfter: 1,
-        nativeError: { category: "NATIVE_OPERATION_REJECTED" }
-      }
-    });
-    expect(native.create_new_transparent_address).toHaveBeenCalledOnce();
-    expect(native.save_wallet_file).toHaveBeenCalledOnce();
-    expect(await provider.listReceivePaths()).toMatchObject([{ pathId: path.pathId, sourceChain: "base", address: newAddress }]);
-  });
-
-  it("reports a stable error when native receiver creation fails without changing the inventory", async () => {
-    const { provider, native } = await createHarness();
-    await connect(provider);
-    native.receiverCreateFailure = "before";
-    native.receiverCreateErrorMessage = "wallet mutex poisoned; PRIVATE_FIXTURE must not escape";
-
-    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
-    const error = await createPath(provider, "base").catch((value: unknown) => value);
-    if (!(error instanceof AgentError)) throw error;
-
-    expect(error).toMatchObject({
-      code: "ZINGO_RECEIVER_CREATION_FAILED_NO_CHANGE",
-      receiverCreationDiagnostic: {
-        stage: "native_create",
-        classification: "native_rejected_before_mutation",
-        receiverCountBefore: 0,
-        receiverCountAfter: 0,
-        nativeError: { class: "Error", category: "WALLET_STATE_LOCKED" }
-      }
-    });
-    expect(JSON.stringify(error.receiverCreationDiagnostic)).not.toContain("PRIVATE_FIXTURE");
-    expect(info.mock.calls.flat().join(" ")).not.toContain("PRIVATE_FIXTURE");
-    expect(info.mock.calls.flat().join(" ")).toContain('"receiverCountBefore":0');
-    expect(info.mock.calls.flat().join(" ")).toContain('"receiverCountAfter":0');
-    expect(native.create_new_transparent_address).toHaveBeenCalledOnce();
-    expect(await provider.listReceivePaths()).toEqual([]);
-  });
-
-  it("uses the allow-gap native entry point only for one registered product-chain receiver", async () => {
-    const { provider, native } = await createHarness();
-    await connect(provider);
-    const base = await createPath(provider, "base");
-    const arbitrum = await createPath(provider, "arbitrum");
-
-    expect(base.pathId).toBe(basePathId);
-    expect(arbitrum).toMatchObject({ pathId: arbitrumPathId, sourceChain: "arbitrum", address: arbitrumAddress });
-    expect(native.create_new_transparent_address).toHaveBeenCalledOnce();
-    expect(native.create_new_transparent_address_allow_gap).toHaveBeenCalledOnce();
-    expect(await provider.listReceivePaths()).toEqual([
-      expect.objectContaining({ pathId: basePathId, sourceChain: "base", address: baseAddress }),
-      expect.objectContaining({ pathId: arbitrumPathId, sourceChain: "arbitrum", address: arbitrumAddress })
-    ]);
-    expect((await provider.getCapabilities()).canGenerateTransparentReceiver).toBe(false);
-  });
-
-  it("reconciles an allow-gap receiver even if the native call mutates and then rejects", async () => {
-    const { provider, native } = await createHarness();
-    await connect(provider);
-    await createPath(provider, "base");
-    native.receiverCreateFailure = "after";
-
-    const path = await createPath(provider, "arbitrum");
-
-    expect(path).toMatchObject({
-      pathId: arbitrumPathId,
-      sourceChain: "arbitrum",
-      address: arbitrumAddress,
-      creationDiagnostic: {
-        stage: "native_create",
-        classification: "native_rejected_after_mutation_reconciled",
-        receiverCountBefore: 1,
-        receiverCountAfter: 2
-      }
-    });
-    expect(native.create_new_transparent_address_allow_gap).toHaveBeenCalledOnce();
-    expect(await provider.listReceivePaths()).toMatchObject([
-      { pathId: basePathId, sourceChain: "base", address: baseAddress },
-      { pathId: arbitrumPathId, sourceChain: "arbitrum", address: arbitrumAddress }
-    ]);
-  }, 15_000);
-
-  it("reconciles the sole inventory addition when the native response cannot be parsed", async () => {
-    const { provider, native } = await createHarness();
-    await connect(provider);
-    native.malformedReceiverCreateResult = true;
-    native.generatedAddresses = [newAddress];
-
-    const path = await createPath(provider, "base");
-
-    expect(path.creationDiagnostic).toMatchObject({
-      stage: "response_parse",
-      classification: "receiver_created_response_parse_failed",
-      receiverCountBefore: 0,
-      receiverCountAfter: 1
-    });
-    expect(await provider.listReceivePaths()).toMatchObject([{ sourceChain: "base", address: newAddress }]);
-    expect(native.create_new_transparent_address).toHaveBeenCalledOnce();
-  });
-
-  it("reports a manifest registration failure with inventory counts", async () => {
-    const { provider, native } = await createHarness();
-    await connect(provider);
-    (provider as unknown as { registerPath: () => ReceivePath }).registerPath = () => { throw new Error("manifest fixture"); };
-
-    await expect(createPath(provider, "base")).rejects.toMatchObject({
-      code: "ZINGO_RECEIVER_PERSISTENCE_FAILED",
-      receiverCreationDiagnostic: {
-        stage: "manifest_registration",
-        classification: "manifest_registration_failed",
-        receiverCountBefore: 0,
-        receiverCountAfter: 1
-      }
-    });
-    expect(native.create_new_transparent_address).toHaveBeenCalledOnce();
-    expect(await provider.listReceivePaths()).toEqual([]);
-  });
-
-  it("classifies an unexplained unchanged inventory as unknown without exposing native values", async () => {
-    const { provider, native } = await createHarness();
-    await connect(provider);
-    native.create_new_transparent_address.mockImplementation(async () => "unparsed native result fixture");
-
-    await expect(createPath(provider, "arbitrum")).rejects.toMatchObject({
-      code: "ZINGO_RECEIVER_OUTCOME_UNKNOWN",
-      receiverCreationDiagnostic: {
-        stage: "inventory_after",
-        classification: "unknown_failure",
-        receiverCountBefore: 0,
-        receiverCountAfter: 0
-      }
-    });
-    expect(await provider.listReceivePaths()).toEqual([]);
-  });
-
-  it("durably blocks retries after the native mutation outcome becomes ambiguous", async () => {
-    const { provider, native, stateDir } = await createHarness();
-    await connect(provider);
-    const originalInventoryRead = native.get_transparent_addresses.getMockImplementation()!;
-    native.get_transparent_addresses
-      .mockImplementationOnce(originalInventoryRead)
-      .mockRejectedValueOnce(new Error("temporary inventory read failure"))
-      .mockImplementation(originalInventoryRead);
-
-    await expect(createPath(provider, "base")).rejects.toMatchObject({ code: "ZINGO_RECEIVER_OUTCOME_UNKNOWN" });
-    const intent = await readMutationIntent(stateDir);
-    expect(intent).toMatchObject({ pathId: basePathId, sourceChain: "base", expectedReceiverCount: 0, state: "pending" });
-    expect(JSON.stringify(intent)).not.toContain(baseAddress);
+  it("uses allow-gap only for the second distinct chain and never finalizes it in Session A", async () => {
+    const h = await createHarness({ registeredChains: ["base"] }); await connect(h.provider);
+    await expect(createPath(h.provider, "arbitrum")).rejects.toMatchObject({ code: restartCode });
+    expect(h.native.create_new_transparent_address).not.toHaveBeenCalled();
+    expect(h.native.create_new_transparent_address_allow_gap).toHaveBeenCalledOnce();
+    expect(await h.provider.listReceivePaths()).toHaveLength(1);
+    const intent = await readMutationIntent(h.stateDir);
+    expect(intent).toMatchObject({ pathId: arbitrumPathId, sourceChain: "arbitrum", expectedReceiverCount: 1, observedPostReceiverCount: 2 });
+    expect(JSON.stringify(intent)).not.toContain(arbitrumAddress);
     expect(JSON.stringify(intent)).not.toMatch(/seed|mnemonic|private.?key|viewing.?key/i);
-
-    await expect(createPath(provider, "base")).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
-    await expect(provider.createReceivePath("arbitrum", arbitrumPathId, true)).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
-    expect(native.create_new_transparent_address).toHaveBeenCalledOnce();
-    expect(native.create_new_transparent_address_allow_gap).not.toHaveBeenCalled();
-    expect((await provider.getCapabilities()).receiverCreationBlocker).toBe("RECEIVER_OUTCOME_RECONCILIATION_REQUIRED");
+    await expect(resolve(h, "arbitrum")).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
   });
 
-  it("keeps the durable unresolved guard after provider reconstruction with the same state directory", async () => {
-    const first = await createHarness();
-    await connect(first.provider);
-    const originalInventoryRead = first.native.get_transparent_addresses.getMockImplementation()!;
-    first.native.get_transparent_addresses.mockImplementationOnce(originalInventoryRead).mockRejectedValueOnce(new Error("inventory unavailable"));
-    await expect(createPath(first.provider, "base")).rejects.toMatchObject({ code: "ZINGO_RECEIVER_OUTCOME_UNKNOWN" });
+  it("new process maps exactly the persisted 1-to-2 addition to the pending chain and path", async () => {
+    const first = await createHarness({ registeredChains: ["base"] }); await connect(first.provider);
+    await expect(createPath(first.provider, "arbitrum")).rejects.toMatchObject({ code: restartCode });
+    const second = await nextSession(first);
+    expect(second.native.run_sync).not.toHaveBeenCalled();
+    const path = await resolve(second, "arbitrum");
+    expect(path).toMatchObject({ pathId: arbitrumPathId, sourceChain: "arbitrum", address: arbitrumAddress });
+    expect(path.address).not.toBe(baseAddress);
+    expect(await readMutationIntent(first.stateDir)).toBeNull();
+    const manifest = JSON.parse(await readFile(join(first.stateDir, ".zecrescue-agent-paths.json"), "utf8")) as ReceivePath[];
+    expect(manifest).toEqual(await second.provider.listReceivePaths());
+    expect(manifest).toHaveLength(2);
+    expect(second.native.init_from_b64).toHaveBeenCalledOnce();
+    expect(second.native.deinitialize).not.toHaveBeenCalled();
+    expect(second.native.save_wallet_file).not.toHaveBeenCalled();
+    expect(second.native.create_new_transparent_address_allow_gap).not.toHaveBeenCalled();
+    expect(await second.provider.getReceiveStatus(arbitrumPathId, true)).toMatchObject({ sourceChain: "arbitrum", amountZatoshis: "3000", state: "received" });
+    expect(second.native.get_spendable_balance_with_address).toHaveBeenCalledWith(arbitrumAddress, "false");
+    await expect(second.provider.getReceiveStatus(randomUUID(), true)).rejects.toMatchObject({ code: "RECEIVE_PATH_NOT_FOUND" });
+  });
 
-    const restarted = await createHarness({ stateDir: first.stateDir });
-    await connect(restarted.provider);
+  it("same-process provider/runtime reconstruction cannot satisfy restart verification", async () => {
+    const first = await createHarness({ registeredChains: ["base"] }); await connect(first.provider);
+    await expect(createPath(first.provider, "arbitrum")).rejects.toMatchObject({ code: restartCode });
+    const reconstructed = await nextSession(first, first.native.persistedAddresses, false);
+    await expect(resolve(reconstructed, "arbitrum")).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
+    expect((await reconstructed.provider.getWalletDiagnostics(true)).pendingReceiverMutation?.requiresAgentRestart).toBe(true);
+    expect(await readMutationIntent(first.stateDir)).not.toBeNull();
+    expect(reconstructed.native.create_new_transparent_address_allow_gap).not.toHaveBeenCalled();
+  });
+
+  it("does not allow the same initialized native module to open another wallet instance", async () => {
+    const first = await createHarness(); await connect(first.provider);
+    const sameRuntime = await createHarness({ native: first.native, walletBaseDir: first.walletBaseDir, stateDir: first.stateDir });
+    await expect(sameRuntime.provider.openWallet(true)).rejects.toMatchObject({ code: "AGENT_RESTART_REQUIRED_BEFORE_WALLET_REOPEN" });
+    expect(first.native.init_from_b64).toHaveBeenCalledOnce();
+  });
+
+  it("blocks same-path, different-path and different-chain retries after ambiguous inventory reads", async () => {
+    const h = await createHarness({ registeredChains: ["base"] }); await connect(h.provider);
+    const original = h.native.get_transparent_addresses.getMockImplementation()!;
+    h.native.get_transparent_addresses.mockImplementationOnce(original).mockRejectedValueOnce(new Error("private native error fixture"));
+    await expect(createPath(h.provider, "arbitrum")).rejects.toMatchObject({ code: restartCode });
+    for (const [chain, pathId] of [["arbitrum", arbitrumPathId], ["arbitrum", randomUUID()], ["base", randomUUID()]] as const) {
+      await expect(h.provider.createReceivePath(chain, pathId, true)).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
+    }
+    const restarted = await nextSession(h);
     await expect(createPath(restarted.provider, "arbitrum")).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
-    expect(restarted.native.create_new_transparent_address).not.toHaveBeenCalled();
+    expect(h.native.create_new_transparent_address_allow_gap).toHaveBeenCalledOnce();
     expect(restarted.native.create_new_transparent_address_allow_gap).not.toHaveBeenCalled();
-    expect((await restarted.provider.getCapabilities()).receiverCreationBlocker).toBe("RECEIVER_OUTCOME_RECONCILIATION_REQUIRED");
   });
 
-  it("explicitly resolves an interrupted no-change operation only after reopening the saved pre-state", async () => {
-    const { provider, native, stateDir } = await createHarness();
-    await writeFile(join(stateDir, ".zecrescue-agent-receiver-mutation.json"), JSON.stringify({
-      schemaVersion: 1,
-      pathId: basePathId,
-      sourceChain: "base",
-      expectedReceiverCount: 0,
-      expectedInventoryFingerprint: createHash("sha256").update("[]").digest("hex"),
-      state: "pending"
-    }));
-    await connect(provider);
-
-    await expect(provider.reconcileSoleUnregisteredReceivePath("base", true, true)).rejects.toMatchObject({ code: "ZINGO_RECEIVER_CREATION_FAILED_NO_CHANGE" });
-
-    expect(native.deinitialize).toHaveBeenCalledOnce();
-    expect(native.init_from_b64).toHaveBeenCalledTimes(2);
-    expect(native.save_wallet_file).not.toHaveBeenCalled();
-    expect(native.create_new_transparent_address).not.toHaveBeenCalled();
-    expect(await readMutationIntent(stateDir)).toBeNull();
+  it("native rejection with unchanged inventory remains pending until a new process proves the pre-state", async () => {
+    const h = await createHarness({ registeredChains: ["base"] }); await connect(h.provider);
+    h.native.receiverCreateFailure = "before";
+    await expect(createPath(h.provider, "arbitrum")).rejects.toMatchObject({ code: restartCode });
+    expect(await readMutationIntent(h.stateDir)).toMatchObject({ state: "restart_required_verify_outcome" });
+    expect(h.native.deinitialize).not.toHaveBeenCalled();
+    const next = await nextSession(h);
+    await expect(resolve(next, "arbitrum")).rejects.toMatchObject({ code: "RECEIVER_MUTATION_RESOLVED_NO_CHANGE" });
+    expect(await readMutationIntent(h.stateDir)).toBeNull();
+    expect(await next.provider.listReceivePaths()).toHaveLength(1);
+    expect(next.native.create_new_transparent_address_allow_gap).not.toHaveBeenCalled();
   });
 
-  it("clears the intent only when a rejected native call proves the exact unchanged inventory", async () => {
-    const { provider, native, stateDir } = await createHarness();
-    await connect(provider);
-    native.receiverCreateFailure = "before";
-    await expect(createPath(provider, "base")).rejects.toMatchObject({ code: "ZINGO_RECEIVER_CREATION_FAILED_NO_CHANGE" });
-    expect(native.deinitialize).toHaveBeenCalledOnce();
-    expect(native.init_from_b64).toHaveBeenCalledTimes(2);
-    expect(await readMutationIntent(stateDir)).toBeNull();
-    expect(await provider.listReceivePaths()).toEqual([]);
-
-    native.receiverCreateFailure = "none";
-    const next = await createPath(provider, "base");
-    expect(next.address).toBe(baseAddress);
-    expect(native.create_new_transparent_address).toHaveBeenCalledTimes(2);
-    expect(await readMutationIntent(stateDir)).toBeNull();
+  it("preserves sanitized stage/count diagnostics and never includes raw native details", async () => {
+    const h = await createHarness(); await connect(h.provider);
+    const rawDetail = "test-only-sensitive-native-detail";
+    h.native.receiverCreateFailure = "before";
+    h.native.receiverCreateErrorMessage = rawDetail;
+    const logger = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const error = await createPath(h.provider, "base").catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: restartCode, receiverCreationDiagnostic: { receiverCountBefore: 0, receiverCountAfter: 0, nativeError: { class: "Error", category: "NATIVE_OPERATION_REJECTED" } } });
+    expect(JSON.stringify(error)).not.toContain(rawDetail);
+    expect(JSON.stringify(logger.mock.calls)).not.toContain(rawDetail);
+    expect(await readMutationIntent(h.stateDir)).not.toBeNull();
   });
 
-  it("retains the intent when a rejected call's saved wallet cannot prove the unchanged inventory", async () => {
-    const { provider, native, stateDir } = await createHarness();
-    await connect(provider);
-    native.receiverCreateFailure = "before";
-    native.reopenInventoryOverride = [unrelatedAddress];
-
-    await expect(createPath(provider, "base")).rejects.toMatchObject({ code: "ZINGO_RECEIVER_OUTCOME_UNKNOWN" });
-    expect(await readMutationIntent(stateDir)).toMatchObject({ pathId: basePathId, sourceChain: "base", state: "pending" });
-    expect(await provider.listReceivePaths()).toEqual([]);
-    await expect(createPath(provider, "base")).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
-    expect(native.create_new_transparent_address).toHaveBeenCalledOnce();
+  it("reports pre-mutation inventory failure without writing an intent or calling native create", async () => {
+    const h = await createHarness(); await connect(h.provider);
+    h.native.get_transparent_addresses.mockRejectedValueOnce(new Error("inventory read unavailable"));
+    await expect(createPath(h.provider, "base")).rejects.toMatchObject({ code: "ZINGO_RECEIVER_OUTCOME_UNKNOWN", receiverCreationDiagnostic: { stage: "inventory_before", receiverCountBefore: null } });
+    expect(await readMutationIntent(h.stateDir)).toBeNull();
+    expect(h.native.create_new_transparent_address).not.toHaveBeenCalled();
   });
 
-  it("rejects replacement inventories and retains the pending intent without mapping Arbitrum", async () => {
-    const { provider, native } = await createHarness();
-    await connect(provider);
-    const base = await createPath(provider, "base");
-    native.create_new_transparent_address_allow_gap.mockImplementationOnce(async () => {
-      native.addresses = [unrelatedAddress];
-      return unrelatedAddress;
-    });
-
-    await expect(createPath(provider, "arbitrum")).rejects.toMatchObject({ code: "ZINGO_RECEIVER_OUTCOME_UNKNOWN" });
-    expect(await provider.listReceivePaths()).toEqual([expect.objectContaining({ pathId: basePathId, sourceChain: "base", address: base.address })]);
-    expect((await provider.getCapabilities()).receiverCreationBlocker).toBe("RECEIVER_OUTCOME_RECONCILIATION_REQUIRED");
-    expect(native.create_new_transparent_address_allow_gap).toHaveBeenCalledOnce();
-    await expect(createPath(provider, "arbitrum")).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
-    expect(native.create_new_transparent_address_allow_gap).toHaveBeenCalledOnce();
-  });
-
-  it("rejects a 1-to-3 inventory transition and leaves the intent unresolved", async () => {
-    const { provider, native } = await createHarness();
-    await connect(provider);
-    const base = await createPath(provider, "base");
-    native.create_new_transparent_address_allow_gap.mockImplementationOnce(async () => {
-      native.addresses.push(arbitrumAddress, unrelatedAddress);
-      return arbitrumAddress;
-    });
-
-    await expect(createPath(provider, "arbitrum")).rejects.toMatchObject({ code: "ZINGO_RECEIVER_OUTCOME_UNKNOWN" });
-    expect(await provider.listReceivePaths()).toEqual([expect.objectContaining({ pathId: basePathId, sourceChain: "base", address: base.address })]);
-    expect((await provider.getCapabilities()).receiverCreationBlocker).toBe("RECEIVER_OUTCOME_RECONCILIATION_REQUIRED");
-  });
-
-  it("blocks receiver creation while sync is behind and does not write an intent", async () => {
-    const { provider, native, stateDir } = await createHarness();
-    await connect(provider);
-    native.walletHeight = 499;
-    await expect(createPath(provider, "base")).rejects.toMatchObject({ code: "RECEIVER_WALLET_NOT_AT_TIP" });
-    expect(native.create_new_transparent_address).not.toHaveBeenCalled();
-    expect(native.create_new_transparent_address_allow_gap).not.toHaveBeenCalled();
-    expect(await readMutationIntent(stateDir)).toBeNull();
-  });
-
-  it("blocks receiver creation when fresh sync reads fail", async () => {
-    const { provider, native, stateDir } = await createHarness();
-    await connect(provider);
-    native.get_latest_block_server.mockRejectedValueOnce(new Error("remote sync status unavailable"));
-    await expect(createPath(provider, "base")).rejects.toMatchObject({ code: "RECEIVER_SYNC_PRECHECK_FAILED" });
-    expect(native.create_new_transparent_address).not.toHaveBeenCalled();
-    expect(native.create_new_transparent_address_allow_gap).not.toHaveBeenCalled();
-    expect(await readMutationIntent(stateDir)).toBeNull();
-  });
-
-  it("blocks receiver creation when the fresh sync state is unsupported", async () => {
-    const { provider, native, stateDir } = await createHarness();
-    await connect(provider);
-    native.poll_sync.mockRejectedValueOnce(new Error("unexpected sync status"));
-    await expect(createPath(provider, "base")).rejects.toMatchObject({ code: "RECEIVER_SYNC_PRECHECK_FAILED" });
-    expect(native.create_new_transparent_address).not.toHaveBeenCalled();
-    expect(native.create_new_transparent_address_allow_gap).not.toHaveBeenCalled();
-    expect(await readMutationIntent(stateDir)).toBeNull();
+  it("resolves an interrupted pending-before-native intent from an exact new-process pre-state", async () => {
+    const h = await createHarness({ registeredChains: ["base"] }); await connect(h.provider);
+    h.native.receiverCreateFailure = "before";
+    await expect(createPath(h.provider, "arbitrum")).rejects.toMatchObject({ code: restartCode });
+    const intent = await readMutationIntent(h.stateDir);
+    await writeFile(join(h.stateDir, ".zecrescue-agent-receiver-mutation.json"), JSON.stringify({ ...intent, state: "pending_before_native" }));
+    const next = await nextSession(h);
+    await expect(resolve(next, "arbitrum")).rejects.toMatchObject({ code: "RECEIVER_MUTATION_RESOLVED_NO_CHANGE" });
+    expect(await readMutationIntent(h.stateDir)).toBeNull();
   });
 
   it.each([
-    { wallet: 500, server: 500, task: "sync task is not complete", label: "equal height with active sync" },
-    { wallet: 501, server: 500, task: "sync task is not complete", label: "ahead height with active sync" },
-    { wallet: 500, server: 500, task: "sync task is complete", label: "equal height with idle sync" },
-    { wallet: 501, server: 500, task: "sync task is complete", label: "ahead height with idle sync" }
-  ])("allows the fresh at-tip gate for $label", async ({ wallet, server, task }) => {
-    const { provider, native } = await createHarness();
-    await connect(provider);
-    native.walletHeight = wallet;
-    native.serverHeight = server;
-    native.syncState = task;
-    const path = await createPath(provider, "base");
-    expect(path.address).toBe(baseAddress);
-    expect(native.create_new_transparent_address).toHaveBeenCalledOnce();
+    { label: "replacement", inventory: [unrelatedAddress] },
+    { label: "original disappears", inventory: [] },
+    { label: "multiple new receivers", inventory: [baseAddress, arbitrumAddress, unrelatedAddress] },
+    { label: "duplicate inventory", inventory: [baseAddress, baseAddress] }
+  ])("rejects unsupported inventory: $label, without mapping or clearing", async ({ inventory }) => {
+    const h = await createHarness({ registeredChains: ["base"] }); await connect(h.provider);
+    h.native.create_new_transparent_address_allow_gap.mockImplementationOnce(async () => { h.native.addresses = [...inventory]; return arbitrumAddress; });
+    await expect(createPath(h.provider, "arbitrum")).rejects.toMatchObject({ code: restartCode });
+    expect(await h.provider.listReceivePaths()).toHaveLength(1);
+    if (new Set(inventory).size !== inventory.length) {
+      await expect(nextSession(h, inventory)).rejects.toBeInstanceOf(AgentError);
+    } else {
+      const next = await nextSession(h, inventory);
+      await expect(resolve(next, "arbitrum")).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
+      expect(await next.provider.listReceivePaths()).toHaveLength(1);
+    }
+    expect(await readMutationIntent(h.stateDir)).not.toBeNull();
   });
 
-  it("keeps the pending guard and creates no mapping when wallet save fails", async () => {
-    const { provider, native, stateDir } = await createHarness();
-    await connect(provider);
-    native.saveFailure = true;
-    await expect(createPath(provider, "base")).rejects.toMatchObject({ code: "ZINGO_RECEIVER_PERSISTENCE_FAILED" });
-    expect(await provider.listReceivePaths()).toEqual([]);
-    expect(await readMutationIntent(stateDir)).toMatchObject({ pathId: basePathId, state: "pending" });
-    native.saveFailure = false;
-    await expect(createPath(provider, "base")).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
-    expect(native.create_new_transparent_address).toHaveBeenCalledOnce();
+  it("rejects a different post-state fingerprint even when it contains one unique addition", async () => {
+    const h = await createHarness({ registeredChains: ["base"] }); await connect(h.provider);
+    await expect(createPath(h.provider, "arbitrum")).rejects.toMatchObject({ code: restartCode });
+    const next = await nextSession(h, [baseAddress, unrelatedAddress]);
+    await expect(resolve(next, "arbitrum")).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
+    expect(await readMutationIntent(h.stateDir)).not.toBeNull();
   });
 
-  it("keeps the pending guard when manifest persistence fails after wallet mutation", async () => {
-    const { provider, native, stateDir } = await createHarness();
-    await connect(provider);
-    (provider as unknown as { savePathRegistry: () => Promise<void> }).savePathRegistry = async () => { throw new Error("manifest disk failure"); };
-    await expect(createPath(provider, "base")).rejects.toMatchObject({ code: "ZINGO_RECEIVER_PERSISTENCE_FAILED" });
-    expect(await provider.listReceivePaths()).toEqual([]);
-    expect(await readMutationIntent(stateDir)).toMatchObject({ pathId: basePathId, state: "pending" });
-    await expect(createPath(provider, "base")).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
-    expect(native.create_new_transparent_address).toHaveBeenCalledOnce();
+  it("refuses wrong pending source-chain and path identity", async () => {
+    const h = await createHarness({ registeredChains: ["base"] }); await connect(h.provider);
+    await expect(createPath(h.provider, "arbitrum")).rejects.toMatchObject({ code: restartCode });
+    const next = await nextSession(h);
+    await expect(resolve(next, "base")).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
+    await expect(next.provider.reconcileSoleUnregisteredReceivePath("arbitrum", true, true, randomUUID())).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
+    await expect(next.provider.reconcileSoleUnregisteredReceivePath("arbitrum", true, true)).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
+    expect(await next.provider.listReceivePaths()).toHaveLength(1);
   });
 
-  it("does not map a receiver that fails exact inventory verification after reopen", async () => {
-    const { provider, native, stateDir } = await createHarness();
-    await connect(provider);
-    native.reopenInventoryOverride = [];
-    await expect(createPath(provider, "base")).rejects.toMatchObject({ code: "ZINGO_RECEIVER_REOPEN_VERIFICATION_FAILED" });
-    expect(await provider.listReceivePaths()).toEqual([]);
-    expect(await readMutationIntent(stateDir)).toMatchObject({ pathId: basePathId, state: "pending" });
-    expect(native.save_wallet_file).toHaveBeenCalledOnce();
-    expect(native.deinitialize).toHaveBeenCalledOnce();
-    expect(native.init_from_b64).toHaveBeenCalledTimes(2);
+  it("cannot resolve against a different configured wallet file even with matching public inventory", async () => {
+    const h = await createHarness({ registeredChains: ["base"] }); await connect(h.provider);
+    await expect(createPath(h.provider, "arbitrum")).rejects.toMatchObject({ code: restartCode });
+    const native = new FakeZingoNative(); native.addresses = [...h.native.persistedAddresses];
+    const differentWallet = await createHarness({ stateDir: h.stateDir, native, agentSessionId: randomUUID() });
+    await connect(differentWallet.provider);
+    await expect(resolve(differentWallet, "arbitrum")).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
+    expect(await readMutationIntent(h.stateDir)).not.toBeNull();
   });
 
-  it("persists the exact two-receiver mapping only after reopen and then clears the intent", async () => {
-    const { provider, native, stateDir } = await createHarness();
-    await connect(provider);
-    await createPath(provider, "base");
-    const arbitrum = await createPath(provider, "arbitrum");
-    expect(arbitrum.creationDiagnostic).toMatchObject({ receiverCountBefore: 1, receiverCountAfter: 2 });
-    expect(native.save_wallet_file).toHaveBeenCalledTimes(2);
-    expect(native.init_from_b64).toHaveBeenCalledTimes(3);
-    expect(await provider.listReceivePaths()).toHaveLength(2);
-    expect(await readMutationIntent(stateDir)).toBeNull();
+  it("keeps the guard when registry persistence fails in the verification session", async () => {
+    const h = await createHarness({ registeredChains: ["base"] }); await connect(h.provider);
+    await expect(createPath(h.provider, "arbitrum")).rejects.toMatchObject({ code: restartCode });
+    const next = await nextSession(h);
+    (next.provider as unknown as { savePathRegistry: () => Promise<void> }).savePathRegistry = async () => { throw new AgentError(503, "LOCAL_PATH_REGISTRY_WRITE_FAILED"); };
+    await expect(resolve(next, "arbitrum")).rejects.toMatchObject({ code: "LOCAL_PATH_REGISTRY_WRITE_FAILED" });
+    expect(await next.provider.listReceivePaths()).toHaveLength(1);
+    expect(await readMutationIntent(h.stateDir)).not.toBeNull();
   });
 
-  it("will reconcile a pending address only for its original chain and path identity", async () => {
-    const { provider, native } = await createHarness();
-    await connect(provider);
-    const base = await createPath(provider, "base");
-    const originalInventoryRead = native.get_transparent_addresses.getMockImplementation()!;
-    native.get_transparent_addresses.mockImplementationOnce(originalInventoryRead).mockRejectedValueOnce(new Error("inventory unavailable"));
-    await expect(createPath(provider, "arbitrum")).rejects.toMatchObject({ code: "ZINGO_RECEIVER_OUTCOME_UNKNOWN" });
-
-    await expect(provider.reconcileSoleUnregisteredReceivePath("base", true, true)).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
-    expect(await provider.listReceivePaths()).toEqual([expect.objectContaining({ pathId: basePathId, sourceChain: "base", address: base.address })]);
-    const reconciled = await provider.reconcileSoleUnregisteredReceivePath("arbitrum", true, true);
-    expect(reconciled).toMatchObject({ pathId: arbitrumPathId, sourceChain: "arbitrum", address: arbitrumAddress });
-    expect(native.create_new_transparent_address_allow_gap).toHaveBeenCalledOnce();
-    expect(await provider.listReceivePaths()).toHaveLength(2);
+  it("recovers a crash after manifest persistence but before pending deletion without duplicate paths", async () => {
+    const h = await createHarness({ registeredChains: ["base"] }); await connect(h.provider);
+    await expect(createPath(h.provider, "arbitrum")).rejects.toMatchObject({ code: restartCode });
+    const second = await nextSession(h);
+    (second.provider as unknown as { clearReceiverMutationIntent: () => Promise<void> }).clearReceiverMutationIntent = async () => { throw new AgentError(503, "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED"); };
+    await expect(resolve(second, "arbitrum")).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
+    expect(await second.provider.listReceivePaths()).toHaveLength(2);
+    expect(await readMutationIntent(h.stateDir)).not.toBeNull();
+    const third = await nextSession(second);
+    expect(await resolve(third, "arbitrum")).toMatchObject({ pathId: arbitrumPathId, sourceChain: "arbitrum" });
+    expect(await third.provider.listReceivePaths()).toHaveLength(2);
+    expect(await readMutationIntent(h.stateDir)).toBeNull();
+    expect(third.native.create_new_transparent_address_allow_gap).not.toHaveBeenCalled();
   });
 
-  it("reuses the existing source-chain path instead of generating another receiver", async () => {
-    const { provider, native } = await createHarness();
-    await connect(provider);
-    const first = await createPath(provider, "base");
-    const second = await provider.createReceivePath("base", "c0b20000-0000-4000-8000-000000000003", true);
+  it.each(["missing_session", "missing_post_fingerprint", "wrong_post_count", "unknown_state"])("rejects incomplete/invalid durable schema: %s", async (fault) => {
+    const h = await createHarness({ registeredChains: ["base"] }); await connect(h.provider);
+    await expect(createPath(h.provider, "arbitrum")).rejects.toMatchObject({ code: restartCode });
+    const row = (await readMutationIntent(h.stateDir))!;
+    if (fault === "missing_session") delete row.createdByAgentSessionId;
+    if (fault === "missing_post_fingerprint") delete row.observedPostInventoryFingerprint;
+    if (fault === "wrong_post_count") row.observedPostReceiverCount = 3;
+    if (fault === "unknown_state") row.state = "finalized";
+    await writeFile(join(h.stateDir, ".zecrescue-agent-receiver-mutation.json"), JSON.stringify(row));
+    const next = await nextSession(h);
+    expect((await next.provider.getCapabilities()).receiverCreationBlocker).toBe("RECEIVER_OUTCOME_RECONCILIATION_REQUIRED");
+    await expect(resolve(next, "arbitrum")).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
+  });
 
-    expect(second).toMatchObject({ pathId: first.pathId, address: first.address, sourceChain: "base" });
-    expect(second.creationDiagnostic).toBeUndefined();
-    expect(native.create_new_transparent_address).toHaveBeenCalledTimes(1);
+  it.each(["{", JSON.stringify({ schemaVersion: 999 }), JSON.stringify({ state: "unknown" })])("fails closed on corrupt/unknown pending data", async (content) => {
+    const h = await createHarness({ registeredChains: ["base"] });
+    await writeFile(join(h.stateDir, ".zecrescue-agent-receiver-mutation.json"), content);
+    await connect(h.provider);
+    expect((await h.provider.getCapabilities()).receiverCreationBlocker).toBe("RECEIVER_OUTCOME_RECONCILIATION_REQUIRED");
+    await expect(createPath(h.provider, "arbitrum")).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
+    expect(h.native.create_new_transparent_address_allow_gap).not.toHaveBeenCalled();
+  });
+
+  it.each(["Wallet saved successfully. Size: 256 bytes.", "Wallet is empty. Nothing to save."])("accepts only reviewed save form for restart verification: %s", async (result) => {
+    const h = await createHarness(); await connect(h.provider);
+    h.native.save_wallet_file.mockResolvedValue(result);
+    await expect(createPath(h.provider, "base")).rejects.toMatchObject({ code: restartCode, receiverCreationDiagnostic: { stage: "restart_required" } });
+    expect(await readMutationIntent(h.stateDir)).not.toBeNull();
+    expect(await h.provider.listReceivePaths()).toEqual([]);
+  });
+
+  it.each(["ok", "Wallet is empty. Nothing to save. trailing", "Wallet saved successfully. Size: 0 bytes."])("unknown save result keeps unresolved state: %s", async (result) => {
+    const h = await createHarness(); await connect(h.provider);
+    h.native.save_wallet_file.mockResolvedValue(result);
+    await expect(createPath(h.provider, "base")).rejects.toMatchObject({ code: restartCode, receiverCreationDiagnostic: { stage: "wallet_save" } });
+    expect(await readMutationIntent(h.stateDir)).not.toBeNull();
+  });
+
+  it("verifies the autosave-first benign result from a new process's saved inventory", async () => {
+    const h = await createHarness({ registeredChains: ["base"] }); await connect(h.provider);
+    h.native.save_wallet_file.mockImplementationOnce(async () => {
+      h.native.persistedAddresses = [...h.native.addresses]; // models autosave winning the dirty-flag race
+      return "Wallet is empty. Nothing to save.";
+    });
+    await expect(createPath(h.provider, "arbitrum")).rejects.toMatchObject({ code: restartCode, receiverCreationDiagnostic: { stage: "restart_required" } });
+    const next = await nextSession(h);
+    expect(await resolve(next, "arbitrum")).toMatchObject({ pathId: arbitrumPathId, address: arbitrumAddress });
+    expect(await readMutationIntent(h.stateDir)).toBeNull();
+  });
+
+  it("save failure and lost unsaved receiver resolve only as no-change in a new process", async () => {
+    const h = await createHarness({ registeredChains: ["base"] }); await connect(h.provider);
+    h.native.saveFailure = true;
+    await expect(createPath(h.provider, "arbitrum")).rejects.toMatchObject({ code: restartCode, receiverCreationDiagnostic: { stage: "wallet_save" } });
+    await expect(createPath(h.provider, "arbitrum")).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
+    const next = await nextSession(h);
+    await expect(resolve(next, "arbitrum")).rejects.toMatchObject({ code: "RECEIVER_MUTATION_RESOLVED_NO_CHANGE" });
+    expect(await next.provider.listReceivePaths()).toHaveLength(1);
+  });
+
+  it("mutation then error and malformed native response are verified from the next process's disk inventory", async () => {
+    for (const mode of ["after", "malformed"] as const) {
+      const h = await createHarness({ registeredChains: ["base"] }); await connect(h.provider);
+      if (mode === "after") h.native.receiverCreateFailure = "after";
+      else h.native.malformedReceiverCreateResult = true;
+      await expect(createPath(h.provider, "arbitrum")).rejects.toMatchObject({ code: restartCode });
+      const next = await nextSession(h);
+      expect(await resolve(next, "arbitrum")).toMatchObject({ address: arbitrumAddress, pathId: arbitrumPathId });
+    }
+  });
+
+  it("reconciles a sole receiver already present in the fresh disk load without creating or reopening", async () => {
+    const h = await createHarness(); h.native.addresses = [unrelatedAddress]; await connect(h.provider);
+    const path = await h.provider.reconcileSoleUnregisteredReceivePath("base", true, true);
+    expect(path).toMatchObject({ sourceChain: "base", address: unrelatedAddress });
+    expect(h.native.create_new_transparent_address).not.toHaveBeenCalled();
+    expect(h.native.init_from_b64).toHaveBeenCalledOnce();
+    expect(h.native.deinitialize).not.toHaveBeenCalled();
+  });
+
+  it("does not adopt unregistered receivers discovered only after wallet open", async () => {
+    const h = await createHarness(); await connect(h.provider); h.native.addresses = [unrelatedAddress];
+    await expect(h.provider.reconcileSoleUnregisteredReceivePath("base", true, true)).rejects.toMatchObject({ code: "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" });
+  });
+
+  it("refuses multiple unregistered receivers and unregistered inventory before native creation", async () => {
+    const h = await createHarness(); h.native.addresses = [unrelatedAddress, newAddress]; await connect(h.provider);
+    await expect(h.provider.reconcileSoleUnregisteredReceivePath("base", true, true)).rejects.toMatchObject({ code: "UNREGISTERED_RECEIVER_NOT_UNIQUE" });
+    await expect(createPath(h.provider, "base")).rejects.toMatchObject({ code: "UNREGISTERED_RECEIVER_RECONCILIATION_REQUIRED" });
+    expect(h.native.create_new_transparent_address).not.toHaveBeenCalled();
+  });
+
+  it("reuses an existing chain path but never rebinds its path ID to the other chain", async () => {
+    const h = await createHarness({ registeredChains: ["base"] }); await connect(h.provider);
+    expect(await h.provider.createReceivePath("base", randomUUID(), true)).toMatchObject({ pathId: basePathId });
+    await expect(h.provider.createReceivePath("arbitrum", basePathId, true)).rejects.toMatchObject({ code: "RECEIVE_PATH_ID_ALREADY_REGISTERED" });
+    expect(h.native.create_new_transparent_address).not.toHaveBeenCalled();
+  });
+
+  it.each(["incomplete", "sync task is complete", "Sync task is not complete. extra", '{"sync_complete":{}}', '{"running":true}'])("malformed sync cannot authorize native creation: %s", async (raw) => {
+    const h = await createHarness(); await connect(h.provider); h.native.syncState = raw;
+    await expect(createPath(h.provider, "base")).rejects.toMatchObject({ code: "ZINGO_SYNC_STATUS_UNSUPPORTED" });
+    expect(h.native.create_new_transparent_address).not.toHaveBeenCalled();
+    expect(await readMutationIntent(h.stateDir)).toBeNull();
+  });
+
+  it("unproven no-handle fails closed, while a consumed completion permits subsequent no-handle", async () => {
+    const h = await createHarness(); await connect(h.provider);
+    h.native.poll_sync.mockResolvedValueOnce("Sync task has not been launched.");
+    await expect(createPath(h.provider, "base")).rejects.toMatchObject({ code: "ZINGO_SYNC_STATUS_UNSUPPORTED" });
+    expect(h.native.create_new_transparent_address).not.toHaveBeenCalled();
+    const first = await h.provider.getWalletDiagnostics(true);
+    const second = await h.provider.getWalletDiagnostics(true);
+    expect(first.sync.taskState).toBe("idle"); expect(second.sync.taskState).toBe("idle");
+    await expect(createPath(h.provider, "base")).rejects.toMatchObject({ code: restartCode });
+  });
+
+  it.each([
+    { wallet: 500, server: 500, state: "Sync task is not complete." },
+    { wallet: 501, server: 500, state: "Sync task is not complete." },
+    { wallet: 500, server: 500, state: completeSync },
+    { wallet: 501, server: 500, state: completeSync }
+  ])("accepts exact at-tip/ahead active or completion schemas ($wallet/$server)", async ({ wallet, server, state }) => {
+    const h = await createHarness(); await connect(h.provider);
+    h.native.walletHeight = wallet; h.native.serverHeight = server; h.native.syncState = state;
+    await expect(createPath(h.provider, "base")).rejects.toMatchObject({ code: restartCode });
+    expect(h.native.create_new_transparent_address).toHaveBeenCalledOnce();
+  });
+
+  it.each(["behind", "missing", "throws"])("fresh %s sync blocks before native creation", async (failure) => {
+    const h = await createHarness(); await connect(h.provider);
+    if (failure === "behind") h.native.walletHeight = 499;
+    if (failure === "missing") h.native.get_latest_block_wallet.mockResolvedValueOnce("unknown");
+    if (failure === "throws") h.native.get_latest_block_server.mockRejectedValueOnce(new Error("read failed"));
+    await expect(createPath(h.provider, "base")).rejects.toBeInstanceOf(AgentError);
+    expect(h.native.create_new_transparent_address).not.toHaveBeenCalled();
+    expect(await readMutationIntent(h.stateDir)).toBeNull();
   });
 
   it("keeps shield preparation and confirmation disabled until runtime verification is explicitly configured", async () => {
-    const { provider, native } = await createHarness();
+    const { provider, native } = await createHarness({ registeredChains: ["base", "arbitrum"] });
     await connect(provider);
-    await registerBoth(provider);
     expect((await provider.getCapabilities()).canPrepareShielding).toBe(false);
     await expect(provider.prepareShielding("all_eligible_transparent", true)).rejects.toMatchObject({ code: "SHIELDING_RUNTIME_NOT_VERIFIED" });
     expect(native.shield).not.toHaveBeenCalled();
     expect(native.confirm).not.toHaveBeenCalled();
   });
 
-  it("creates a receiver through the native address method and records its chain locally", async () => {
-    const { provider, native } = await createHarness({ shieldingRuntimeVerified: true });
-    await connect(provider);
-    native.generatedAddresses = [newAddress];
-    const path = await createPath(provider, "arbitrum");
-    expect(path).toMatchObject({ sourceChain: "arbitrum", address: newAddress, accountId: 0 });
-    expect(native.create_new_transparent_address).toHaveBeenCalledTimes(1);
-    expect(native.save_wallet_file).toHaveBeenCalledTimes(1);
-  });
-
   it("discloses account-level scope, includes both chain balances and prepares without broadcasting", async () => {
-    const { provider, native } = await createHarness({ shieldingRuntimeVerified: true });
+    const { provider, native } = await createHarness({ registeredChains: ["base", "arbitrum"], shieldingRuntimeVerified: true });
     await connect(provider);
-    await registerBoth(provider);
     const plan = await provider.prepareShielding("all_eligible_transparent", true);
     expect(plan).toMatchObject({
       state: "awaiting_approval",
@@ -885,14 +801,12 @@ describe("Zingo PC native wallet boundary", () => {
   });
 
   it("requires a dedicated wallet and rejects unassigned transparent funds", async () => {
-    const notDedicated = await createHarness({ dedicated: false, shieldingRuntimeVerified: true });
+    const notDedicated = await createHarness({ registeredChains: ["base", "arbitrum"], dedicated: false, shieldingRuntimeVerified: true });
     await connect(notDedicated.provider);
-    await registerBoth(notDedicated.provider);
     await expect(notDedicated.provider.prepareShielding("all_eligible_transparent", true)).rejects.toMatchObject({ code: "DEDICATED_RECOVERY_WALLET_REQUIRED" });
 
-    const unassigned = await createHarness({ shieldingRuntimeVerified: true });
+    const unassigned = await createHarness({ registeredChains: ["base", "arbitrum"], shieldingRuntimeVerified: true });
     await connect(unassigned.provider);
-    await registerBoth(unassigned.provider);
     unassigned.native.addresses.push(unrelatedAddress);
     unassigned.native.balances.set(unrelatedAddress, 500n);
     await expect(unassigned.provider.prepareShielding("all_eligible_transparent", true)).rejects.toMatchObject({ code: "UNASSIGNED_TRANSPARENT_FUNDS_PRESENT" });
@@ -901,9 +815,8 @@ describe("Zingo PC native wallet boundary", () => {
 
   it("requires a matching, unexpired local approval before the single confirm/broadcast call", async () => {
     let now = 1_000_000;
-    const { provider, native } = await createHarness({ shieldingRuntimeVerified: true, now: () => now });
+    const { provider, native } = await createHarness({ registeredChains: ["base", "arbitrum"], shieldingRuntimeVerified: true, now: () => now });
     await connect(provider);
-    await registerBoth(provider);
     const plan = await provider.prepareShielding("all_eligible_transparent", true);
     await expect(provider.approveShielding(plan.preparationId, "f".repeat(64), true)).rejects.toMatchObject({ code: "SHIELD_PREPARATION_NOT_FOUND" });
     expect(native.confirm).not.toHaveBeenCalled();
@@ -918,9 +831,8 @@ describe("Zingo PC native wallet boundary", () => {
 
   it("expires an unapproved proposal and never confirms it", async () => {
     let now = 2_000_000;
-    const { provider, native } = await createHarness({ shieldingRuntimeVerified: true, now: () => now });
+    const { provider, native } = await createHarness({ registeredChains: ["base", "arbitrum"], shieldingRuntimeVerified: true, now: () => now });
     await connect(provider);
-    await registerBoth(provider);
     const plan = await provider.prepareShielding("all_eligible_transparent", true);
     now += 2 * 60 * 1000 + 1;
     await expect(provider.approveShielding(plan.preparationId, plan.preparationHash, true)).rejects.toMatchObject({ code: "SHIELD_PREPARATION_EXPIRED" });
@@ -929,9 +841,8 @@ describe("Zingo PC native wallet boundary", () => {
   });
 
   it("confirms only an Ironwood-received transaction and reports any transparent remainder", async () => {
-    const { provider, native } = await createHarness({ shieldingRuntimeVerified: true });
+    const { provider, native } = await createHarness({ registeredChains: ["base", "arbitrum"], shieldingRuntimeVerified: true });
     await connect(provider);
-    const { basePathId, arbitrumPathId } = await registerBoth(provider);
     const plan = await provider.prepareShielding("all_eligible_transparent", true);
     await provider.approveShielding(plan.preparationId, plan.preparationHash, true);
 
@@ -942,9 +853,8 @@ describe("Zingo PC native wallet boundary", () => {
     let status = await provider.getShieldStatus(plan.preparationId, true);
     expect(status).toMatchObject({ state: "confirmed", ironwoodConfirmed: true, transparentBalanceRemainingZatoshis: "0" });
 
-    const second = await createHarness({ shieldingRuntimeVerified: true });
+    const second = await createHarness({ registeredChains: ["base", "arbitrum"], shieldingRuntimeVerified: true });
     await connect(second.provider);
-    await registerBoth(second.provider);
     const pendingPlan = await second.provider.prepareShielding("all_eligible_transparent", true);
     await second.provider.approveShielding(pendingPlan.preparationId, pendingPlan.preparationHash, true);
     second.native.transferRows = [{ txid, status: "confirmed", pools_received: ["Ironwood"] }];
@@ -955,9 +865,8 @@ describe("Zingo PC native wallet boundary", () => {
   });
 
   it("does not treat legacy Orchard pool labels as Ironwood confirmation", async () => {
-    const { provider, native } = await createHarness({ shieldingRuntimeVerified: true });
+    const { provider, native } = await createHarness({ registeredChains: ["base", "arbitrum"], shieldingRuntimeVerified: true });
     await connect(provider);
-    await registerBoth(provider);
     const plan = await provider.prepareShielding("all_eligible_transparent", true);
     await provider.approveShielding(plan.preparationId, plan.preparationHash, true);
 
@@ -971,9 +880,8 @@ describe("Zingo PC native wallet boundary", () => {
   });
 
   it("fails closed if proposal creation fails and does not broadcast", async () => {
-    const { provider, native } = await createHarness({ shieldingRuntimeVerified: true });
+    const { provider, native } = await createHarness({ registeredChains: ["base", "arbitrum"], shieldingRuntimeVerified: true });
     await connect(provider);
-    await registerBoth(provider);
     native.proposalError = "proposal refused";
     await expect(provider.prepareShielding("all_eligible_transparent", true)).rejects.toMatchObject({ code: "ZINGO_SHIELD_PROPOSAL_REFUSED" });
     expect(native.confirm).not.toHaveBeenCalled();

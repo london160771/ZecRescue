@@ -1,6 +1,6 @@
 export type ReceiverCreationDiagnostic = {
-  stage: "inventory_before" | "native_create" | "inventory_after" | "response_parse" | "manifest_registration" | "wallet_save" | "wallet_reopen" | "manifest_write" | "complete";
-  classification: "native_rejected_before_mutation" | "receiver_created_response_parse_failed" | "manifest_registration_failed" | "unknown_failure" | "native_rejected_after_mutation_reconciled" | "success";
+  stage: "inventory_before" | "native_create" | "inventory_after" | "response_parse" | "manifest_registration" | "wallet_save" | "wallet_reopen" | "manifest_write" | "complete" | "restart_required";
+  classification: "native_rejected_before_mutation" | "receiver_created_response_parse_failed" | "manifest_registration_failed" | "unknown_failure" | "native_rejected_after_mutation_reconciled" | "success" | "restart_required_verification";
   receiverCountBefore: number | null;
   receiverCountAfter: number | null;
   nativeError?: {

@@ -121,6 +121,7 @@ export type AgentWalletDiagnostics = {
   network: "mainnet";
   walletType: string;
   reconciliationSupported: boolean;
+  pendingReceiverMutation?: { pathId: string; sourceChain: ChainKey; requiresAgentRestart: boolean } | null;
   sync: {
     state: "catching_up" | "at_tip_sync_active" | "synced";
     taskState: "active" | "idle";
@@ -139,6 +140,7 @@ export function assessArbitrumReceiverRetry(
   canGenerateReceiver: boolean,
   receiverCreationBlocker: string | null = null
 ): { safe: boolean; reason: string } {
+  if (diagnostics.pendingReceiverMutation) return { safe: false, reason: "A pending receiver operation must be verified after a full agent restart; do not create another receiver." };
   if (!canGenerateReceiver) return { safe: false, reason: receiverCreationBlocker ?? "The local agent does not currently report receiver creation as available." };
   if (diagnostics.network !== "mainnet") return { safe: false, reason: "The wallet diagnostics do not confirm Zcash Mainnet." };
   if (diagnostics.walletType !== "Loaded from seed or mnemonic phrase") {
@@ -178,8 +180,8 @@ export function assessArbitrumReceiverRetry(
 function formatReceiverCreationDiagnostic(value: unknown): string | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
-  const stages = new Set(["inventory_before", "native_create", "inventory_after", "response_parse", "manifest_registration", "wallet_save", "wallet_reopen", "manifest_write", "complete"]);
-  const classifications = new Set(["native_rejected_before_mutation", "receiver_created_response_parse_failed", "manifest_registration_failed", "unknown_failure", "native_rejected_after_mutation_reconciled", "success"]);
+  const stages = new Set(["inventory_before", "native_create", "inventory_after", "response_parse", "manifest_registration", "wallet_save", "wallet_reopen", "manifest_write", "complete", "restart_required"]);
+  const classifications = new Set(["native_rejected_before_mutation", "receiver_created_response_parse_failed", "manifest_registration_failed", "unknown_failure", "native_rejected_after_mutation_reconciled", "success", "restart_required_verification"]);
   const nativeClasses = new Set(["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "NativeError"]);
   const nativeCategories = new Set(["LIGHTWALLETD_NOT_INITIALIZED", "WALLET_STATE_LOCKED", "NATIVE_OPERATION_REJECTED"]);
   const count = (input: unknown): string => Number.isSafeInteger(input) && Number(input) >= 0 ? String(input) : "unknown";
@@ -196,6 +198,7 @@ export async function getAgentWalletDiagnostics(token: string, allowRemoteLightw
     network: "mainnet";
     walletType: string;
     reconciliationSupported?: true;
+    pendingReceiverMutation?: AgentWalletDiagnostics["pendingReceiverMutation"];
     sync: AgentWalletDiagnostics["sync"];
     receivers: Array<{ address: string; pathId: string | null; sourceChain: ChainKey | null }>;
   }>(agent("/v1/wallet/diagnostics"), {
@@ -203,6 +206,8 @@ export async function getAgentWalletDiagnostics(token: string, allowRemoteLightw
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify({ allowRemoteLightwalletd })
   });
+  const pending = raw.pendingReceiverMutation;
+  if (pending != null && (typeof pending.pathId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(pending.pathId) || (pending.sourceChain !== "base" && pending.sourceChain !== "arbitrum") || typeof pending.requiresAgentRestart !== "boolean")) throw new Error("INVALID_AGENT_DIAGNOSTICS");
   const receivers = Array.isArray(raw.receivers) ? raw.receivers : [];
   const registeredMappings = receivers.flatMap((receiver) => {
     const validChain = receiver.sourceChain === "base" || receiver.sourceChain === "arbitrum";
@@ -213,6 +218,7 @@ export async function getAgentWalletDiagnostics(token: string, allowRemoteLightw
     network: raw.network,
     walletType: raw.walletType,
     reconciliationSupported: raw.reconciliationSupported === true,
+    pendingReceiverMutation: pending ?? null,
     sync: raw.sync,
     receiverCount: receivers.length,
     unregisteredReceiverCount: receivers.length - registeredMappings.length,
@@ -241,11 +247,11 @@ export async function createAgentPath(token: string, sourceChain: ChainKey, path
   });
 }
 
-export async function reconcileAgentPath(token: string, sourceChain: ChainKey, allowRemoteLightwalletd: true): Promise<AgentPath> {
+export async function reconcileAgentPath(token: string, sourceChain: ChainKey, allowRemoteLightwalletd: true, pathId?: string): Promise<AgentPath> {
   return requestJson(agent("/v1/receive-paths/reconcile"), {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ sourceChain, confirmSoleUnregistered: true, allowRemoteLightwalletd })
+    body: JSON.stringify({ sourceChain, ...(pathId ? { pathId } : {}), confirmSoleUnregistered: true, allowRemoteLightwalletd })
   });
 }
 

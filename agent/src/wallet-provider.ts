@@ -47,6 +47,7 @@ export type WalletDiagnostics = {
   network: "mainnet";
   walletType: string;
   reconciliationSupported: true;
+  pendingReceiverMutation?: { pathId: string; sourceChain: SourceChain; requiresAgentRestart: boolean } | null;
   sync: {
     state: "catching_up" | "at_tip_sync_active" | "synced";
     taskState: "active" | "idle";
@@ -104,7 +105,7 @@ export interface ZcashWalletProvider {
   getWalletDiagnostics(allowRemoteLightwalletd: true): Promise<WalletDiagnostics>;
   listReceivePaths(): Promise<ReceivePath[]>;
   createReceivePath(sourceChain: SourceChain, pathId: string, allowRemoteLightwalletd: true): Promise<ReceivePath>;
-  reconcileSoleUnregisteredReceivePath(sourceChain: SourceChain, confirmSoleUnregistered: true, allowRemoteLightwalletd: true): Promise<ReceivePath>;
+  reconcileSoleUnregisteredReceivePath(sourceChain: SourceChain, confirmSoleUnregistered: true, allowRemoteLightwalletd: true, pathId?: string): Promise<ReceivePath>;
   getReceiveStatus(pathId: string, allowRemoteLightwalletd: true): Promise<ReceiveStatus>;
   prepareShielding(scope: "all_eligible_transparent", allowRemoteLightwalletd: true): Promise<ShieldPreparation>;
   approveShielding(preparationId: string, preparationHash: string, allowRemoteLightwalletd: true): Promise<ShieldSubmission>;
