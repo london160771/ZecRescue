@@ -1,7 +1,11 @@
 name: Verify Zingolib transparent recovery gap
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - phase3b-zingolib-gap-recovery-proof-20261021
+    paths:
+      - ".github/workflows/verify-zingolib-gap-recovery.yml"
 
 permissions:
   contents: read
