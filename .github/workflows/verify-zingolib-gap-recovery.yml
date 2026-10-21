@@ -174,17 +174,19 @@ jobs:
 
           $logText = if (Test-Path $logPath) { Get-Content $logPath -Raw } else { '' }
           if ($logText) { Write-Output $logText }
+          $matchText = ($logText -replace "`r`n", "`n") -replace "`r", "`n"
           $escapedName = [regex]::Escape($testName)
-          $passedLine = $logText -match "(?m)^test $escapedName ... ok$"
-          $failedLine = $logText -match "(?m)^test $escapedName ... FAILED$"
-          $missingManifest = $logText -match '(?im)could not find.*Cargo\.toml'
-          $compilerFailure = $logText -match '(?im)^error(\[[A-Z0-9]+\])?:' -or
-            $logText -match '(?im)could not compile|linking with .* failed|undefined reference|LNK\d{4}|fatal error C\d{4}'
+          $passedLine = $matchText -match "(?m)^test\s+$escapedName\s+\.\.\.\s+ok$"
+          $failedLine = $matchText -match "(?m)^test\s+$escapedName\s+\.\.\.\s+FAILED$"
+          $passedSummary = $matchText -match '(?m)^test result: ok\. 1 passed; 0 failed;.*$'
+          $missingManifest = $matchText -match '(?im)could not find.*Cargo\.toml'
+          $compilerFailure = $matchText -match '(?im)^error(\[[A-Z0-9]+\])?:' -or
+            $matchText -match '(?im)could not compile|linking with .* failed|undefined reference|LNK\d{4}|fatal error C\d{4}'
 
           if (-not $workingDirectoryReady -or $setupError -or $missingManifest) {
             $result = 'HARNESS_FAIL'
             if ($setupError) { Write-Output "Harness setup error: $setupError" }
-          } elseif ($testExit -eq 0 -and $passedLine -and $logText -match 'test result: ok\. 1 passed') {
+          } elseif ($testExit -eq 0 -and $passedLine -and $passedSummary) {
             $result = 'PASS'
           } elseif ($failedLine) {
             $result = 'TEST_FAIL'
