@@ -134,8 +134,20 @@ jobs:
           if (-not [Environment]::Is64BitOperatingSystem) { throw 'The Windows runner is not x64.' }
           cmake --version
           if ($LASTEXITCODE -ne 0) { throw 'CMake is required by the upstream source build but is unavailable.' }
-          cl.exe /Bv
-          if ($LASTEXITCODE -ne 0) { throw 'The runner MSVC compiler is unavailable.' }
+          $compiler = Get-Command cl.exe -CommandType Application -ErrorAction Stop
+          if ([string]::IsNullOrWhiteSpace($compiler.Source)) { throw 'The runner MSVC compiler is unavailable.' }
+          $probeRoot = Join-Path $env:RUNNER_TEMP ('zecrescue-msvc-probe-' + [Guid]::NewGuid().ToString('N'))
+          try {
+            New-Item -ItemType Directory -Path $probeRoot | Out-Null
+            $sourcePath = Join-Path $probeRoot 'probe.c'
+            $objectPath = Join-Path $probeRoot 'probe.obj'
+            [IO.File]::WriteAllText($sourcePath, 'int main(void) { return 0; }', [Text.UTF8Encoding]::new($false))
+            & $compiler.Source /nologo /c "/Fo$objectPath" $sourcePath
+            if ($LASTEXITCODE -ne 0) { throw 'The disposable MSVC compile probe failed.' }
+            if (-not (Test-Path -LiteralPath $objectPath -PathType Leaf)) { throw 'The disposable MSVC compile probe did not produce the expected object file.' }
+          } finally {
+            if (Test-Path -LiteralPath $probeRoot) { Remove-Item -LiteralPath $probeRoot -Recurse -Force }
+          }
 
       - name: Build only the Windows x64 native addon
         shell: pwsh
