@@ -95,22 +95,51 @@ jobs:
           $testName = 'lightclient::mock_chain_tests::seed_recovery_discovers_used_transparent_receiver_after_unused_index'
           $testCommand = "cargo test --locked -p zingolib --lib $testName -- --exact --nocapture"
           $logPath = Join-Path $env:RUNNER_TEMP 'zingolib-gap-recovery-test.log'
-          & cargo test --locked -p zingolib --lib $testName -- --exact --nocapture *> $logPath
-          $testExit = $LASTEXITCODE
+          $zingolib = Join-Path $env:GITHUB_WORKSPACE 'zingolib'
+          $testExit = $null
+          $workingDirectoryReady = $false
+          $setupError = $null
+
+          if (-not (Test-Path -LiteralPath (Join-Path $zingolib 'Cargo.toml') -PathType Leaf)) {
+            $setupError = 'Pinned Zingolib Cargo.toml is missing.'
+          } else {
+            $pushedLocation = $false
+            try {
+              Push-Location -LiteralPath $zingolib
+              $pushedLocation = $true
+              $workingDirectoryReady = $true
+              & cargo test --locked -p zingolib --lib $testName -- --exact --nocapture *> $logPath
+              $testExit = $LASTEXITCODE
+            } catch {
+              $setupError = $_.Exception.Message
+            } finally {
+              if ($pushedLocation) { Pop-Location }
+            }
+          }
+
           $logText = if (Test-Path $logPath) { Get-Content $logPath -Raw } else { '' }
           if ($logText) { Write-Output $logText }
           $escapedName = [regex]::Escape($testName)
           $passedLine = $logText -match "(?m)^test $escapedName ... ok$"
           $failedLine = $logText -match "(?m)^test $escapedName ... FAILED$"
-          if ($testExit -eq 0 -and $passedLine -and $logText -match 'test result: ok\. 1 passed') {
+          $missingManifest = $logText -match '(?im)could not find.*Cargo\.toml'
+          $compilerFailure = $logText -match '(?im)^error(\[[A-Z0-9]+\])?:' -or
+            $logText -match '(?im)could not compile|linking with .* failed|undefined reference|LNK\d{4}|fatal error C\d{4}'
+
+          if (-not $workingDirectoryReady -or $setupError -or $missingManifest) {
+            $result = 'HARNESS_FAIL'
+            if ($setupError) { Write-Output "Harness setup error: $setupError" }
+          } elseif ($testExit -eq 0 -and $passedLine -and $logText -match 'test result: ok\. 1 passed') {
             $result = 'PASS'
           } elseif ($failedLine) {
             $result = 'TEST_FAIL'
-          } elseif ($testExit -ne 0) {
+          } elseif ($compilerFailure) {
             $result = 'COMPILE_FAIL'
           } else {
-            $result = 'TEST_SELECTION_FAIL'
+            $result = 'HARNESS_FAIL'
+            Write-Output "Focused test did not produce an exact pass/fail result (cargo exit: $testExit)."
           }
+
           "ZINGOLIB_GAP_TEST_RESULT=$result" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
           "ZINGOLIB_GAP_TEST_COMMAND=$testCommand" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
           "Exact focused test result: $result"
