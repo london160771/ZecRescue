@@ -88,6 +88,61 @@ jobs:
           echo "cargo_lock_sha256=$lock_after" >> "$GITHUB_OUTPUT"
           echo "Applied one audited test-only file; Cargo.lock is unchanged."
 
+      - name: Install and verify pinned protoc
+        id: protoc
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          "ZINGOLIB_GAP_TEST_RESULT=HARNESS_FAIL" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+          "ZINGOLIB_PROTOC_VERSION=" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+          "ZINGOLIB_PROTOC_PATH=" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+          $version = '36.2'
+          $expectedVersion = "libprotoc $version"
+          $downloadUrl = 'https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-win64.zip'
+          $expectedSha256 = 'f0c128dc0d8492eceece83bb459a4c0e316764b929ffbf1aa416357fd644edd3'
+          $archivePath = Join-Path $env:RUNNER_TEMP 'protoc-36.2-win64.zip'
+          $installDir = Join-Path $env:RUNNER_TEMP 'protoc-36.2'
+
+          try {
+            Invoke-WebRequest -Uri $downloadUrl -OutFile $archivePath
+            $archiveSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($archiveSha256 -ne $expectedSha256) {
+              throw "Pinned protoc archive SHA-256 mismatch."
+            }
+
+            New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+            Expand-Archive -LiteralPath $archivePath -DestinationPath $installDir -Force
+            $binDir = Join-Path $installDir 'bin'
+            $expectedProtoc = [System.IO.Path]::GetFullPath((Join-Path $binDir 'protoc.exe'))
+            if (-not (Test-Path -LiteralPath $expectedProtoc -PathType Leaf)) {
+              throw "Pinned protoc executable is missing after extraction."
+            }
+
+            Add-Content -Path $env:GITHUB_PATH -Value $binDir -Encoding utf8
+            $env:PATH = "$binDir;$env:PATH"
+            $resolvedProtoc = (Get-Command protoc -CommandType Application -ErrorAction Stop).Source
+            if ([System.IO.Path]::GetFullPath($resolvedProtoc) -ine $expectedProtoc) {
+              throw "Resolved protoc is not the pinned RUNNER_TEMP executable."
+            }
+
+            $versionOutput = & $resolvedProtoc --version
+            $protocExit = $LASTEXITCODE
+            $reportedVersion = (@($versionOutput) -join [Environment]::NewLine).Trim()
+            if ($protocExit -ne 0 -or $reportedVersion -ne $expectedVersion) {
+              throw "Pinned protoc version verification failed; expected '$expectedVersion', received '$reportedVersion'."
+            }
+
+            "ZINGOLIB_PROTOC_VERSION=$reportedVersion" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+            "ZINGOLIB_PROTOC_PATH=$resolvedProtoc" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+            Write-Host "protoc version verified: $reportedVersion"
+            Write-Host "protoc executable: $resolvedProtoc"
+            Write-Host "protoc archive SHA-256 verified: $archiveSha256"
+          } catch {
+            $message = ($_.Exception.Message -replace '[\r\n]+', ' ').Trim()
+            Write-Host "HARNESS_FAIL: pinned protoc setup/version verification failed: $message"
+            exit 1
+          }
+
       - name: Run the focused transparent recovery test
         id: focused-test
         shell: pwsh
@@ -168,6 +223,8 @@ jobs:
           $testCommand = if ($env:ZINGOLIB_GAP_TEST_COMMAND) { $env:ZINGOLIB_GAP_TEST_COMMAND } else { 'cargo test --locked -p zingolib --lib lightclient::mock_chain_tests::seed_recovery_discovers_used_transparent_receiver_after_unused_index -- --exact --nocapture' }
           $lockPath = Join-Path $env:GITHUB_WORKSPACE 'zingolib/Cargo.lock'
           $lockAfter = if (Test-Path $lockPath) { (Get-FileHash $lockPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
+          $protocVersion = if ($env:ZINGOLIB_PROTOC_VERSION) { $env:ZINGOLIB_PROTOC_VERSION } else { $null }
+          $protocPath = if ($env:ZINGOLIB_PROTOC_PATH) { $env:ZINGOLIB_PROTOC_PATH } else { $null }
           $payload = [ordered]@{
             zecrescueBranch = $env:GITHUB_REF_NAME
             zecrescueCommit = $env:GITHUB_SHA
@@ -183,6 +240,8 @@ jobs:
             expectedCargoLockSha256 = '27c8b30118c9c9f3fffa6210ed78c892539b98f4c32d27e059831062c120eb70'
             rustcVersion = (& rustc --version).Trim()
             cargoVersion = (& cargo --version).Trim()
+            protocVersion = $protocVersion
+            protocPath = $protocPath
             exactCargoTestCommand = $testCommand
           }
           $path = Join-Path $env:RUNNER_TEMP 'zingolib-gap-recovery-provenance.json'
