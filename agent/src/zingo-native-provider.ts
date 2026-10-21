@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, open as openFile, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename, isAbsolute, join, resolve, win32 } from "node:path";
 import { isMainnetTransparentP2pkhAddress } from "../../server/src/domain/zcash-address.js";
@@ -23,6 +23,7 @@ const supportedZingolibVersion = "zl_7a542";
 const supportedNativeSha256 = "7ea2565ddf4bcef90fc10e1a11efc355f5d1439f61d73229180db4c166d834d2";
 const supportedRecoveryWalletKind = "Loaded from seed or mnemonic phrase";
 const pathRegistryFileName = ".zecrescue-agent-paths.json";
+const receiverMutationFileName = ".zecrescue-agent-receiver-mutation.json";
 const pathRegistryLimitBytes = 256 * 1024;
 const shieldApprovalTtlMs = 2 * 60 * 1000;
 const mainnetName = "main";
@@ -125,11 +126,23 @@ type WalletBalance = {
   confirmedIronwood: bigint;
 };
 
+type ReceiverMutationIntent = {
+  schemaVersion: 1;
+  pathId: string;
+  sourceChain: SourceChain;
+  expectedReceiverCount: number;
+  expectedInventoryFingerprint: string;
+  state: "pending";
+};
+
 export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
   private readonly paths = new Map<string, ReceivePath>();
   private operationTail: Promise<void> = Promise.resolve();
   private nativePromise?: Promise<ZingoNativeApi>;
   private registryPromise: Promise<void> | undefined;
+  private receiverMutationIntent: ReceiverMutationIntent | undefined;
+  private receiverMutationIntentLoaded = false;
+  private receiverMutationIntentUnresolved = false;
   private walletOpen = false;
   private syncStarted = false;
   private activePlan: ShieldPlan | undefined;
@@ -152,9 +165,18 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
     }
 
     const configComplete = this.hasWalletConfiguration();
+    let localReceiverStateAvailable = true;
+    if (configComplete) {
+      try { await this.loadPathRegistry(); }
+      catch { localReceiverStateAvailable = false; }
+    }
     const compatible = zingoVersion === supportedZingolibVersion;
     const walletReady = runtimeLoaded && compatible && configComplete && this.walletOpen;
-    const receiverCreationBlocker = walletReady && this.paths.size >= 2
+    const receiverCreationBlocker = !localReceiverStateAvailable
+      ? "LOCAL_RECEIVER_STATE_UNAVAILABLE"
+      : this.receiverMutationIntentUnresolved
+        ? "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED"
+        : walletReady && this.paths.size >= 2
       ? "Both supported source-chain receivers are already registered. This wallet will not create any additional receiver paths."
       : walletReady && this.paths.size > 0 && typeof native?.create_new_transparent_address_allow_gap !== "function"
         ? "The pinned Zingo runtime enforces the transparent-address no-gap rule and exposes no allow-gap receiver method. A second receiver is blocked until a reviewed local wrapper exposes the supported Zingolib allow-gap call."
@@ -166,7 +188,9 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
     else if (!this.walletOpen) limitations.push("The wallet has not been opened by this agent. Connect explicitly after closing Zingo PC.");
     if (walletReady && !this.settings.recoveryWalletDedicated) limitations.push("Set the local dedicated-Recovery-Vault acknowledgement before shielding can be prepared.");
     if (walletReady && this.settings.recoveryWalletDedicated && !this.settings.shieldingRuntimeVerified) limitations.push("Shielding remains disabled until the owner verifies this local Zingo wallet runtime and enables it in ignored .env.");
-    if (receiverCreationBlocker) limitations.unshift(receiverCreationBlocker);
+    if (this.receiverMutationIntentUnresolved) limitations.unshift("An interrupted receiver operation must be reconciled against the saved wallet before any receiver creation can continue.");
+    else if (!localReceiverStateAvailable) limitations.unshift("Local receiver state could not be validated; receiver creation is blocked.");
+    else if (receiverCreationBlocker) limitations.unshift(receiverCreationBlocker);
     limitations.push("The installed Zingo PC native API is an internal, version-pinned interface; wallet operations remain unverified until the owner connects the existing wallet locally.");
 
     return {
@@ -269,6 +293,7 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
     return this.serialized(async () => {
       const native = await this.requireOpenWallet();
       await this.loadPathRegistry();
+      this.assertNoUnresolvedReceiverMutation();
       const existingPath = [...this.paths.values()].find((path) => path.sourceChain === sourceChain);
       if (existingPath) return existingPath;
       if (this.paths.has(pathId)) throw new AgentError(409, "RECEIVE_PATH_ID_ALREADY_REGISTERED");
@@ -301,6 +326,25 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
         }
         createNativeReceiver = () => native.create_new_transparent_address_allow_gap!();
       }
+
+      // Re-read sync state inside this serialized operation immediately before
+      // the durable intent is written and the native address mutation begins.
+      let sync: { walletHeight: number | null; serverHeight: number | null; taskState: "active" | "idle"; behind: boolean };
+      try { sync = await this.readSyncHeights(native); }
+      catch { throw new AgentError(503, "RECEIVER_SYNC_PRECHECK_FAILED"); }
+      if (sync.walletHeight === null || sync.serverHeight === null || sync.behind) {
+        throw new AgentError(409, "RECEIVER_WALLET_NOT_AT_TIP");
+      }
+      const intent: ReceiverMutationIntent = {
+        schemaVersion: 1,
+        pathId,
+        sourceChain,
+        expectedReceiverCount: beforeAddresses.length,
+        expectedInventoryFingerprint: inventoryFingerprint(beforeAddresses),
+        state: "pending"
+      };
+      await this.persistReceiverMutationIntent(intent);
+
       let nativeResult: unknown;
       let nativeError: unknown;
       try { nativeResult = await createNativeReceiver(); }
@@ -313,23 +357,37 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
         this.recordReceiverDiagnostic(diagnostic);
         throw new AgentError(503, "ZINGO_RECEIVER_OUTCOME_UNKNOWN", diagnostic);
       }
-      const created = after.filter((address) => !before.has(address));
-      if (created.length === 0 && nativeError !== undefined) {
+      const unchanged = isExactInventory(after, beforeAddresses);
+      const created = validateCompleteInventoryTransition(beforeAddresses, after);
+      if (nativeError !== undefined && unchanged) {
+        // A rejected call plus unchanged in-memory inventory is not enough to
+        // clear a crash-recovery guard. Reopen the saved wallet and prove the
+        // exact pre-state before treating this as a known no-mutation result.
+        try {
+          await this.reopenExistingWalletWithoutSync(native);
+          const reopened = await this.getTransparentAddresses(native);
+          if (!isExactInventory(reopened, beforeAddresses)) throw new Error("saved inventory differs from pre-mutation state");
+        } catch {
+          const diagnostic = this.receiverDiagnostic("wallet_reopen", "unknown_failure", before.size, after.length, nativeError);
+          this.recordReceiverDiagnostic(diagnostic);
+          throw new AgentError(503, "ZINGO_RECEIVER_OUTCOME_UNKNOWN", diagnostic);
+        }
+        await this.clearReceiverMutationIntent(intent);
         const diagnostic = this.receiverDiagnostic("native_create", "native_rejected_before_mutation", before.size, after.length, nativeError);
         this.recordReceiverDiagnostic(diagnostic);
         throw new AgentError(503, "ZINGO_RECEIVER_CREATION_FAILED_NO_CHANGE", diagnostic);
       }
-      if (created.length !== 1) {
+      if (!created) {
         const diagnostic = this.receiverDiagnostic("inventory_after", "unknown_failure", before.size, after.length, nativeError);
         this.recordReceiverDiagnostic(diagnostic);
-        throw new AgentError(503, "ZINGO_NEW_RECEIVER_RESULT_UNSUPPORTED", diagnostic);
+        throw new AgentError(503, "ZINGO_RECEIVER_OUTCOME_UNKNOWN", diagnostic);
       }
 
       let responseParseFailed = false;
       if (nativeError === undefined) {
         try {
           const returnedAddress = parseCreatedReceiver(nativeResult);
-          if (returnedAddress !== created[0]) {
+          if (returnedAddress !== created) {
             const diagnostic = this.receiverDiagnostic("response_parse", "unknown_failure", before.size, after.length);
             this.recordReceiverDiagnostic(diagnostic);
             throw new AgentError(503, "ZINGO_RECEIVER_RESULT_INVENTORY_MISMATCH", diagnostic);
@@ -342,21 +400,17 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
 
       let path: ReceivePath;
       try {
-        path = this.registerPath(sourceChain, created[0]!, pathId);
+        await this.persistAndVerifyReceiverInventory(native, after);
+        path = this.registerPath(sourceChain, created, pathId);
       } catch (error) {
-        const diagnostic = this.receiverDiagnostic("manifest_registration", "manifest_registration_failed", before.size, after.length, error);
+        const stage = error instanceof AgentError && error.code === "ZINGO_RECEIVER_REOPEN_VERIFICATION_FAILED"
+          ? "wallet_reopen"
+          : error instanceof AgentError && error.code === "ZINGO_RECEIVER_PERSISTENCE_FAILED" ? "wallet_save" : "manifest_registration";
+        const diagnostic = this.receiverDiagnostic(stage, "manifest_registration_failed", before.size, after.length, error);
         this.recordReceiverDiagnostic(diagnostic);
         throw error instanceof AgentError
           ? new AgentError(error.statusCode, error.code, diagnostic)
           : new AgentError(503, "ZINGO_RECEIVER_PERSISTENCE_FAILED", diagnostic);
-      }
-      try {
-        await native.save_wallet_file();
-      } catch (error) {
-        this.paths.delete(path.pathId);
-        const diagnostic = this.receiverDiagnostic("wallet_save", "manifest_registration_failed", before.size, after.length, error);
-        this.recordReceiverDiagnostic(diagnostic);
-        throw new AgentError(503, "ZINGO_RECEIVER_PERSISTENCE_FAILED", diagnostic);
       }
       try {
         await this.savePathRegistry();
@@ -366,6 +420,7 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
         this.recordReceiverDiagnostic(diagnostic);
         throw new AgentError(503, "ZINGO_RECEIVER_PERSISTENCE_FAILED", diagnostic);
       }
+      await this.clearReceiverMutationIntent(intent);
       const classification = nativeError !== undefined
         ? "native_rejected_after_mutation_reconciled"
         : responseParseFailed ? "receiver_created_response_parse_failed" : "success";
@@ -382,19 +437,58 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
     return this.serialized(async () => {
       const native = await this.requireOpenWallet();
       await this.loadPathRegistry();
-      const existingPath = [...this.paths.values()].find((path) => path.sourceChain === sourceChain);
-      if (existingPath) return existingPath;
+      if (this.receiverMutationIntentUnresolved && !this.receiverMutationIntent) {
+        throw new AgentError(409, "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED");
+      }
+      const intent = this.receiverMutationIntent;
+      if (intent && intent.sourceChain !== sourceChain) throw new AgentError(409, "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED");
       const addresses = await this.getTransparentAddresses(native);
-      const registeredAddresses = new Set([...this.paths.values()].map((path) => path.address));
-      const unregistered = addresses.filter((address) => !registeredAddresses.has(address));
-      if (unregistered.length !== 1) throw new AgentError(409, "UNREGISTERED_RECEIVER_NOT_UNIQUE");
-      const path = this.registerPath(sourceChain, unregistered[0]!, this.randomId());
+      assertUniqueInventory(addresses);
+      const baselinePaths = [...this.paths.values()].filter((path) => !intent || path.pathId !== intent.pathId);
+      const baselineAddresses = baselinePaths.map((path) => path.address);
+      const pathId = intent?.pathId ?? this.randomId();
+      if (intent && (baselineAddresses.length !== intent.expectedReceiverCount || inventoryFingerprint(baselineAddresses) !== intent.expectedInventoryFingerprint)) {
+        throw new AgentError(409, "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED");
+      }
+      if (intent && baselinePaths.some((path) => path.sourceChain === sourceChain)) throw new AgentError(409, "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED");
+      if (!baselineAddresses.every((address) => addresses.includes(address))) throw new AgentError(409, "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED");
+
+      if (intent && isExactInventory(addresses, baselineAddresses)) {
+        // Discard any possibly-mutated in-memory state, reopen the same saved
+        // wallet without starting sync, and prove the durable pre-state again.
+        try {
+          await this.reopenExistingWalletWithoutSync(native);
+          const reopened = await this.getTransparentAddresses(native);
+          if (!isExactInventory(reopened, baselineAddresses)) throw new Error("saved inventory differs from pending pre-state");
+        } catch {
+          throw new AgentError(503, "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED");
+        }
+        await this.clearReceiverMutationIntent(intent);
+        throw new AgentError(409, "ZINGO_RECEIVER_CREATION_FAILED_NO_CHANGE");
+      }
+
+      const existingSourcePath = [...this.paths.values()].find((path) => path.sourceChain === sourceChain);
+      if (!intent && existingSourcePath) {
+        if (isExactInventory(addresses, baselineAddresses)) return existingSourcePath;
+        throw new AgentError(409, "UNREGISTERED_RECEIVER_NOT_UNIQUE");
+      }
+
+      const created = validateCompleteInventoryTransition(baselineAddresses, addresses);
+      if (!created) throw new AgentError(409, "UNREGISTERED_RECEIVER_NOT_UNIQUE");
+      const existingPath = this.paths.get(pathId);
+      if (existingPath && (existingPath.sourceChain !== sourceChain || existingPath.address !== created)) {
+        throw new AgentError(409, "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED");
+      }
+      let path = existingPath;
       try {
+        await this.persistAndVerifyReceiverInventory(native, addresses);
+        path ??= this.registerPath(sourceChain, created, pathId);
         await this.savePathRegistry();
       } catch (error) {
-        this.paths.delete(path.pathId);
+        if (!existingPath && path) this.paths.delete(path.pathId);
         throw error instanceof AgentError ? error : new AgentError(503, "ZINGO_RECEIVER_PERSISTENCE_FAILED");
       }
+      if (intent) await this.clearReceiverMutationIntent(intent);
       return path;
     });
   }
@@ -722,16 +816,19 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
       const parsed: unknown = JSON.parse(await readFile(registryPath, "utf8"));
       if (!Array.isArray(parsed)) throw new AgentError(503, "LOCAL_PATH_REGISTRY_INVALID");
       for (const row of parsed) {
-        if (!isReceivePath(row) || this.paths.has(row.pathId) || [...this.paths.values()].some((path) => path.address === row.address)) {
+        if (!isReceivePath(row) || this.paths.has(row.pathId) || [...this.paths.values()].some((path) => path.address === row.address || path.sourceChain === row.sourceChain)) {
           throw new AgentError(503, "LOCAL_PATH_REGISTRY_INVALID");
         }
         this.paths.set(row.pathId, row);
       }
+      if (this.paths.size > 2) throw new AgentError(503, "LOCAL_PATH_REGISTRY_INVALID");
     } catch (error) {
-      if (isCode(error, "ENOENT")) return;
-      if (error instanceof AgentError) throw error;
-      throw new AgentError(503, "LOCAL_PATH_REGISTRY_INVALID");
+      if (!isCode(error, "ENOENT")) {
+        if (error instanceof AgentError) throw error;
+        throw new AgentError(503, "LOCAL_PATH_REGISTRY_INVALID");
+      }
     }
+    await this.readReceiverMutationIntent();
   }
 
   private async savePathRegistry(): Promise<void> {
@@ -744,7 +841,11 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
         throw error;
       });
       if (existing && (!existing.isFile() || existing.isSymbolicLink())) throw new AgentError(503, "LOCAL_PATH_REGISTRY_INVALID");
-      const content = JSON.stringify([...this.paths.values()]);
+      const paths = [...this.paths.values()];
+      if (paths.length > 2 || new Set(paths.map((path) => path.sourceChain)).size !== paths.length || new Set(paths.map((path) => path.address)).size !== paths.length || new Set(paths.map((path) => path.pathId)).size !== paths.length) {
+        throw new AgentError(503, "LOCAL_PATH_REGISTRY_INVALID");
+      }
+      const content = JSON.stringify(paths);
       if (Buffer.byteLength(content) > pathRegistryLimitBytes) throw new AgentError(503, "LOCAL_PATH_REGISTRY_INVALID");
       await writeFile(temporaryPath, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
       await rename(temporaryPath, registryPath);
@@ -772,6 +873,10 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
       if (existing.sourceChain !== sourceChain) throw new AgentError(409, "RECEIVER_ALREADY_BOUND_TO_OTHER_CHAIN");
       return existing;
     }
+    if ([...this.paths.values()].some((path) => path.sourceChain === sourceChain)) {
+      throw new AgentError(409, "RECEIVE_SOURCE_CHAIN_ALREADY_REGISTERED");
+    }
+    if (this.paths.size >= 2) throw new AgentError(409, "RECEIVER_GAP_POLICY_LIMIT");
     const path: ReceivePath = {
       pathId,
       sourceChain,
@@ -782,6 +887,141 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
     };
     this.paths.set(path.pathId, path);
     return path;
+  }
+
+  private async readReceiverMutationIntent(): Promise<void> {
+    if (this.receiverMutationIntentLoaded) return;
+    const intentPath = join(await this.resolveStateDir(), receiverMutationFileName);
+    try {
+      const stat = await lstat(intentPath);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4096) {
+        this.receiverMutationIntentUnresolved = true;
+        this.receiverMutationIntentLoaded = true;
+        return;
+      }
+      const parsed: unknown = JSON.parse(await readFile(intentPath, "utf8"));
+      if (!isReceiverMutationIntent(parsed)) {
+        this.receiverMutationIntentUnresolved = true;
+        this.receiverMutationIntentLoaded = true;
+        return;
+      }
+      this.receiverMutationIntent = parsed;
+      this.receiverMutationIntentUnresolved = true;
+      this.receiverMutationIntentLoaded = true;
+    } catch (error) {
+      if (isCode(error, "ENOENT")) {
+        this.receiverMutationIntentLoaded = true;
+        return;
+      }
+      this.receiverMutationIntentUnresolved = true;
+      this.receiverMutationIntentLoaded = true;
+    }
+  }
+
+  private assertNoUnresolvedReceiverMutation(): void {
+    if (this.receiverMutationIntentUnresolved || this.receiverMutationIntent) {
+      throw new AgentError(409, "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED");
+    }
+  }
+
+  private async persistReceiverMutationIntent(intent: ReceiverMutationIntent): Promise<void> {
+    this.assertNoUnresolvedReceiverMutation();
+    const stateDir = await this.resolveStateDir();
+    const intentPath = join(stateDir, receiverMutationFileName);
+    const temporaryPath = `${intentPath}.${this.randomId()}.tmp`;
+    let linked = false;
+    let fileHandle: Awaited<ReturnType<typeof openFile>> | undefined;
+    try {
+      fileHandle = await openFile(temporaryPath, "wx", 0o600);
+      await fileHandle.writeFile(JSON.stringify(intent), "utf8");
+      await fileHandle.sync();
+      await fileHandle.close();
+      fileHandle = undefined;
+      // link() atomically claims the final name without replacing an intent
+      // left by another provider instance or an interrupted operation.
+      await link(temporaryPath, intentPath);
+      linked = true;
+      this.receiverMutationIntent = intent;
+      this.receiverMutationIntentUnresolved = true;
+      await syncDirectory(stateDir);
+      const stat = await lstat(intentPath);
+      const persisted = JSON.parse(await readFile(intentPath, "utf8")) as unknown;
+      if (!stat.isFile() || stat.isSymbolicLink() || !sameMutationIntent(persisted, intent)) {
+        throw new Error("intent verification failed");
+      }
+    } catch {
+      if (linked) {
+        this.receiverMutationIntent = intent;
+        this.receiverMutationIntentUnresolved = true;
+      } else {
+        const existing = await lstat(intentPath).catch(() => undefined);
+        if (existing) this.receiverMutationIntentUnresolved = true;
+      }
+      throw new AgentError(503, this.receiverMutationIntentUnresolved ? "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED" : "RECEIVER_MUTATION_INTENT_WRITE_FAILED");
+    } finally {
+      await fileHandle?.close().catch(() => undefined);
+      await rm(temporaryPath, { force: true }).catch(() => undefined);
+    }
+  }
+
+  private async clearReceiverMutationIntent(intent: ReceiverMutationIntent): Promise<void> {
+    const intentPath = join(await this.resolveStateDir(), receiverMutationFileName);
+    try {
+      const stat = await lstat(intentPath);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4096) throw new Error("intent invalid");
+      const current: unknown = JSON.parse(await readFile(intentPath, "utf8"));
+      if (!sameMutationIntent(current, intent)) throw new Error("intent changed");
+      await rm(intentPath);
+      await syncDirectory(await this.resolveStateDir());
+      this.receiverMutationIntent = undefined;
+      this.receiverMutationIntentUnresolved = false;
+    } catch {
+      this.receiverMutationIntentUnresolved = true;
+      throw new AgentError(503, "RECEIVER_OUTCOME_RECONCILIATION_REQUIRED");
+    }
+  }
+
+  private async persistAndVerifyReceiverInventory(native: ZingoNativeApi, expectedInventory: string[]): Promise<void> {
+    try {
+      const result = await native.save_wallet_file();
+      if (typeof result !== "string" || !/^Wallet saved successfully\. Size: [1-9]\d* bytes\.$/.test(result)) {
+        throw new Error("wallet save was not confirmed");
+      }
+    } catch {
+      throw new AgentError(503, "ZINGO_RECEIVER_PERSISTENCE_FAILED");
+    }
+    try {
+      await this.reopenExistingWalletWithoutSync(native);
+      const reopened = await this.getTransparentAddresses(native);
+      if (!isExactInventory(reopened, expectedInventory)) throw new Error("wallet inventory did not survive reopen");
+    } catch {
+      throw new AgentError(503, "ZINGO_RECEIVER_REOPEN_VERIFICATION_FAILED");
+    }
+  }
+
+  private async reopenExistingWalletWithoutSync(native: ZingoNativeApi): Promise<void> {
+    this.walletOpen = false;
+    try {
+      await this.assertZingoPcClosed();
+      if (this.syncStarted) await this.stopSync(native);
+      const deinitialized = await native.deinitialize();
+      if (deinitialized !== "OK") throw new Error("native wallet deinitialization was not confirmed");
+      this.syncStarted = false;
+      const walletBaseDir = await this.resolveWalletBaseDir();
+      await this.configureWalletBaseDir(native, walletBaseDir);
+      const exists = await native.wallet_exists(this.settings.lightwalletdUri!, mainnetName, performanceLevel, minConfirmations, this.settings.walletName!);
+      if (exists !== true) throw new Error("existing wallet is unavailable");
+      const openResult = await native.init_from_b64(this.settings.lightwalletdUri!, mainnetName, performanceLevel, minConfirmations, this.settings.walletName!);
+      parseNativeJsonRecord(openResult, "ZINGO_WALLET_OPEN_FAILED");
+      const kind = parseNativeJsonRecord(await native.wallet_kind(), "ZINGO_WALLET_KIND_UNSUPPORTED");
+      if (kind.kind !== supportedRecoveryWalletKind) throw new Error("wallet kind changed");
+      this.walletOpen = true;
+    } catch (error) {
+      this.walletOpen = false;
+      this.syncStarted = false;
+      await Promise.resolve(native.deinitialize()).catch(() => undefined);
+      throw error;
+    }
   }
 
   private receiverDiagnostic(
@@ -920,6 +1160,56 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
 
   private now(): number { return this.dependencies.now?.() ?? Date.now(); }
   private randomId(): string { return this.dependencies.randomId?.() ?? randomUUID(); }
+}
+
+function assertUniqueInventory(addresses: string[]): void {
+  if (addresses.length > 2 || new Set(addresses).size !== addresses.length) {
+    throw new AgentError(503, "ZINGO_TRANSPARENT_ADDRESSES_UNSUPPORTED");
+  }
+}
+
+function isExactInventory(actual: string[], expected: string[]): boolean {
+  return actual.length === expected.length &&
+    new Set(actual).size === actual.length &&
+    expected.every((address) => actual.includes(address));
+}
+
+/** Returns the only newly-added address when the complete supported transition holds. */
+function validateCompleteInventoryTransition(before: string[], after: string[]): string | null {
+  if (before.length > 1 || after.length > 2 || new Set(before).size !== before.length || new Set(after).size !== after.length) return null;
+  if (after.length !== before.length + 1 || !before.every((address) => after.includes(address))) return null;
+  const created = after.filter((address) => !before.includes(address));
+  return created.length === 1 ? created[0]! : null;
+}
+
+function inventoryFingerprint(addresses: string[]): string {
+  return createHash("sha256").update(JSON.stringify([...addresses].sort())).digest("hex");
+}
+
+function isReceiverMutationIntent(value: unknown): value is ReceiverMutationIntent {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  const keys = Object.keys(row).sort();
+  return keys.join(",") === "expectedInventoryFingerprint,expectedReceiverCount,pathId,schemaVersion,sourceChain,state" &&
+    row.schemaVersion === 1 && typeof row.pathId === "string" && isPathId(row.pathId) &&
+    (row.sourceChain === "base" || row.sourceChain === "arbitrum") &&
+    Number.isSafeInteger(row.expectedReceiverCount) && Number(row.expectedReceiverCount) >= 0 && Number(row.expectedReceiverCount) <= 1 &&
+    typeof row.expectedInventoryFingerprint === "string" && /^[0-9a-f]{64}$/.test(row.expectedInventoryFingerprint) &&
+    row.state === "pending";
+}
+
+function sameMutationIntent(value: unknown, expected: ReceiverMutationIntent): boolean {
+  return isReceiverMutationIntent(value) && value.schemaVersion === expected.schemaVersion &&
+    value.pathId === expected.pathId && value.sourceChain === expected.sourceChain &&
+    value.expectedReceiverCount === expected.expectedReceiverCount &&
+    value.expectedInventoryFingerprint === expected.expectedInventoryFingerprint && value.state === expected.state;
+}
+
+async function syncDirectory(directory: string): Promise<void> {
+  if (process.platform === "win32") return;
+  const handle = await openFile(directory, "r");
+  try { await handle.sync(); }
+  finally { await handle.close(); }
 }
 
 function parseNativeJson(value: unknown, code: string): unknown {

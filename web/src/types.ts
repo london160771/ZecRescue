@@ -129,7 +129,7 @@ export type AgentPath = {
   receiverType: "transparent_p2pkh";
   generatedAt: string;
   creationDiagnostic?: {
-    stage: "inventory_before" | "native_create" | "inventory_after" | "response_parse" | "manifest_registration" | "wallet_save" | "manifest_write" | "complete";
+    stage: "inventory_before" | "native_create" | "inventory_after" | "response_parse" | "manifest_registration" | "wallet_save" | "wallet_reopen" | "manifest_write" | "complete";
     classification: "native_rejected_before_mutation" | "receiver_created_response_parse_failed" | "manifest_registration_failed" | "unknown_failure" | "native_rejected_after_mutation_reconciled" | "success";
     receiverCountBefore: number | null;
     receiverCountAfter: number | null;

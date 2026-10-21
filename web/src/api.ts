@@ -178,7 +178,7 @@ export function assessArbitrumReceiverRetry(
 function formatReceiverCreationDiagnostic(value: unknown): string | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
-  const stages = new Set(["inventory_before", "native_create", "inventory_after", "response_parse", "manifest_registration", "wallet_save", "manifest_write", "complete"]);
+  const stages = new Set(["inventory_before", "native_create", "inventory_after", "response_parse", "manifest_registration", "wallet_save", "wallet_reopen", "manifest_write", "complete"]);
   const classifications = new Set(["native_rejected_before_mutation", "receiver_created_response_parse_failed", "manifest_registration_failed", "unknown_failure", "native_rejected_after_mutation_reconciled", "success"]);
   const nativeClasses = new Set(["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "NativeError"]);
   const nativeCategories = new Set(["LIGHTWALLETD_NOT_INITIALIZED", "WALLET_STATE_LOCKED", "NATIVE_OPERATION_REJECTED"]);

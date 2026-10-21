@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isAddress } from "viem";
 import { useAccount, useConnect, useDisconnect, useSignTypedData, useSwitchChain } from "wagmi";
+import { runWithInvalidatedAgentDiagnostics } from "./agent-mutation.js";
 import {
   checkAgentHealth,
   checkAgentPath,
@@ -140,6 +141,7 @@ function App() {
   const [agentCapabilities, setAgentCapabilities] = useState<AgentCapabilities | null>(null);
   const [agentDiagnostics, setAgentDiagnostics] = useState<AgentWalletDiagnostics | null>(null);
   const [agentDiagnosticsError, setAgentDiagnosticsError] = useState<string | null>(null);
+  const [receiverDiagnosticsMustRefresh, setReceiverDiagnosticsMustRefresh] = useState(false);
   const [agentPaths, setAgentPaths] = useState<Partial<Record<ChainKey, AgentPath>>>({});
   const [agentPathStatuses, setAgentPathStatuses] = useState<Partial<Record<ChainKey, string>>>({});
   const [agentShieldPlan, setAgentShieldPlan] = useState<AgentShieldPreparation | null>(null);
@@ -291,6 +293,7 @@ function App() {
       try {
         const diagnostics = await getAgentWalletDiagnostics(agentToken.trim(), true);
         setAgentDiagnostics(diagnostics);
+        setReceiverDiagnosticsMustRefresh(false);
         setNotice("Read-only wallet diagnostics completed. No receiver was generated and no transaction was prepared.");
       } catch (caught) {
         setAgentDiagnosticsError("Read-only diagnostics could not be loaded. Check the page error and local agent status before retrying.");
@@ -317,15 +320,21 @@ function App() {
 
   async function handleAgentPath(chain: ChainKey) {
     await runAction(`agent-path-${chain}`, async () => {
+      if (receiverDiagnosticsMustRefresh) throw new Error("Refresh read-only wallet diagnostics before another receiver action.");
       if (!agentCapabilities?.canGenerateTransparentReceiver) {
         throw new Error(agentCapabilities?.receiverCreationBlocker ?? "Open the existing wallet through the local companion first. No receiver has been generated.");
       }
       if (!allowRemoteLightwalletd) throw new Error("Allow remote lightwalletd access first. It can observe this device’s IP and wallet scan queries.");
       const pathId = receiverPathRequestIds.current[chain] ??= crypto.randomUUID();
-      const path = await createAgentPath(agentToken.trim(), chain, pathId, true);
+      const path = await runWithInvalidatedAgentDiagnostics(
+        () => {
+          setAgentDiagnostics(null);
+          setAgentDiagnosticsError(null);
+          setReceiverDiagnosticsMustRefresh(true);
+        },
+        () => createAgentPath(agentToken.trim(), chain, pathId, true)
+      );
       delete receiverPathRequestIds.current[chain];
-      setAgentDiagnostics(null);
-      setAgentDiagnosticsError(null);
       setAgentPaths((current) => ({ ...current, [chain]: path }));
       setReceivers((current) => ({ ...current, [chain]: path.address }));
       const diagnostic = path.creationDiagnostic;
@@ -686,7 +695,8 @@ function App() {
             {agentCapabilities?.canGenerateTransparentReceiver && <div className="agent-tools">{chainKeys.map((chain) => {
               const alreadyMapped = Boolean(agentPaths[chain] || registeredPathFor(chain));
               const allowed = chain !== "arbitrum" || arbitrumRetry.safe;
-              return <button type="button" className={`agent-path-button ${alreadyMapped ? "path-ready" : ""}`} key={chain} disabled={Boolean(busyAction) || alreadyMapped || !allowed} onClick={() => void handleAgentPath(chain)}>{alreadyMapped ? `${chainMetadata[chain].name} path ready` : chain === "arbitrum" && !allowed ? "Run diagnostics before Arbitrum receiver" : `Create ${chainMetadata[chain].name} receiver`}</button>;
+              const refreshRequired = receiverDiagnosticsMustRefresh;
+              return <button type="button" className={`agent-path-button ${alreadyMapped ? "path-ready" : ""}`} key={chain} disabled={Boolean(busyAction) || alreadyMapped || !allowed || refreshRequired} onClick={() => void handleAgentPath(chain)}>{alreadyMapped ? `${chainMetadata[chain].name} path ready` : refreshRequired ? "Refresh diagnostics before receiver action" : chain === "arbitrum" && !allowed ? "Run diagnostics before Arbitrum receiver" : `Create ${chainMetadata[chain].name} receiver`}</button>;
             })}</div>}
             {agentCapabilities?.canPrepareShielding && <div className="agent-shield-tools">
               <strong>Account-level transparent → Ironwood shield</strong>
