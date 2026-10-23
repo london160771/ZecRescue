@@ -164,8 +164,22 @@ jobs:
           try {
             yarn install --frozen-lockfile --non-interactive --ignore-scripts
             if ($LASTEXITCODE -ne 0) { throw 'Frozen dependency installation failed.' }
-            yarn neon-win-x64
-            if ($LASTEXITCODE -ne 0) { throw 'Diagnostic Windows x64 native build failed.' }
+            $buildLog = Join-Path $env:RUNNER_TEMP 'diagnostic-native-build.log'
+            $buildExit = 1
+            for ($attempt = 1; $attempt -le 2; $attempt++) {
+              & yarn neon-win-x64 *> $buildLog
+              $buildExit = $LASTEXITCODE
+              $buildOutput = Get-Content -Raw -LiteralPath $buildLog
+              Write-Output $buildOutput
+              if ($buildExit -eq 0) { break }
+              $paramsConnectionReset = $buildOutput -match 'Error downloading params:[\s\S]*?download request failed:[\s\S]*?ConnectionReset'
+              if ($attempt -eq 1 -and $paramsConnectionReset) {
+                Write-Output 'Pinned Sapling parameter download was reset; retrying the same build once.'
+                continue
+              }
+              break
+            }
+            if ($buildExit -ne 0) { throw 'Diagnostic Windows x64 native build failed.' }
           } finally {
             Pop-Location
           }
