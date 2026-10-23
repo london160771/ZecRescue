@@ -1,0 +1,48 @@
+diff --git a/native/src/lib.rs b/native/src/lib.rs
+index bbb64b6..d162a21 100644
+--- a/native/src/lib.rs
++++ b/native/src/lib.rs
+@@ -795,19 +795,25 @@ fn init_from_b64(mut cx: FunctionContext) -> JsResult<JsString> {
+     let min_confirmations = cx.argument::<JsNumber>(3)?.value(&mut cx);
+     let wallet_name = cx.argument::<JsString>(4)?.value(&mut cx);
+ 
+-    let res: Result<String, ZingolibError> = with_panic_guard(|| {
++    let init_stage = std::sync::Arc::new(std::sync::Mutex::new("INIT_CONFIG_CONSTRUCT"));
++    let stage_for_init = std::sync::Arc::clone(&init_stage);
++    let res: Result<String, ZingolibError> = with_panic_guard(move || {
+         reset_lightclient();
++        *stage_for_init.lock().unwrap() = "INIT_CONFIG_CONSTRUCT";
+         let (builder, _wallet_settings, _lightwalletd_uri) =
+             construct_uri_load_config(server_uri, chain_hint, performance_level, min_confirmations, wallet_name)?;
++        *stage_for_init.lock().unwrap() = "INIT_WALLET_CONFIG_BUILD";
+         // Read the existing wallet file from disk (Read variant).
+         let config = builder
+             .set_wallet_config(WalletConfig::Read)
+             .build()
+             .map_err(|e| ZingolibError::Init(cause_chain(&e)))?;
++        *stage_for_init.lock().unwrap() = "INIT_LIGHTCLIENT_NEW";
+         let mut lightclient = match RT.block_on(async { LightClient::new(config, false).await }) {
+             Ok(l) => l,
+             Err(e) => return Err(ZingolibError::Init(cause_chain(&e))),
+         };
++        *stage_for_init.lock().unwrap() = "INIT_WALLET_KIND_READ";
+         let has_seed = RT.block_on(async {
+             lightclient.wallet().read().await.mnemonic_phrase().is_some()
+         });
+@@ -827,11 +833,16 @@ fn init_from_b64(mut cx: FunctionContext) -> JsResult<JsString> {
+         });
+ 
+         // save the wallet file here
++        *stage_for_init.lock().unwrap() = "INIT_SAVE_TASK";
+         RT.block_on(async { lightclient.save_task().await });
++        *stage_for_init.lock().unwrap() = "INIT_STORE_CLIENT";
+         let _ = store_client(lightclient);
+ 
++        *stage_for_init.lock().unwrap() = "INIT_RECOVERY_DATA";
+         if has_seed { get_seed_string() } else { get_ufvk_string() }
+     });
++    let stage = *init_stage.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
++    let res = res.map_err(|error| ZingolibError::Init(format!("{stage}: {error}")));
+ 
+     match res {
+         Ok(v) => Ok(cx.string(v)),

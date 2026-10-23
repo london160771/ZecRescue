@@ -1,0 +1,224 @@
+name: Diagnostic-only Zingo init_from_b64 stage build
+
+on:
+  push:
+    branches:
+      - phase3-init-diagnostic-native
+    paths:
+      - ".github/workflows/build-zingo-init-diagnostic.yml"
+      - "phase0/patches/zingo-pc-2.0.26-189-init-diagnostic.patch"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic-native-windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout ZecRescue diagnostic branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Checkout exact Zingo PC source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: zingolabs/zingo-pc
+          ref: 4ce0368254150d305b5ac50e3a7f8d536ef7bc47
+          path: upstream/zingo-pc
+          persist-credentials: false
+
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.18.0
+
+      - name: Set up upstream Rust stable toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: stable
+          target: x86_64-pc-windows-msvc
+
+      - name: Configure existing MSVC x64 environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
+        with:
+          arch: x64
+
+      - name: Set up pinned Protocol Buffers compiler
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b
+        with:
+          version: 31.1
+          repo-token: ${{ github.token }}
+
+      - name: Extract canonical source patches from branch commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch_dir="$(cygpath -u "$RUNNER_TEMP")"
+          prod="$patch_dir/zecrescue-audited-${GITHUB_RUN_ID}.patch"
+          diag="$patch_dir/zecrescue-init-diagnostic-${GITHUB_RUN_ID}.patch"
+          git show "${GITHUB_SHA}:phase0/patches/zingo-pc-2.0.26-189-allow-gap.patch" > "$prod"
+          git show "${GITHUB_SHA}:phase0/patches/zingo-pc-2.0.26-189-init-diagnostic.patch" > "$diag"
+          prod_sha="$(sha256sum -- "$prod" | cut -d ' ' -f 1)"
+          diag_sha="$(sha256sum -- "$diag" | cut -d ' ' -f 1)"
+          test "$prod_sha" = '866363eac32d71a5803f31a5c4c396e182bd903ae5cf0038bf6608c04c6232aa'
+          test "$diag_sha" = 'c71a608345ee3992a11a760ac9825461f10ff8f223fb7081574c6d3c02e75507'
+          env_file="$(cygpath -u "$GITHUB_ENV")"
+          printf 'ZECRESCUE_PRODUCTION_PATCH_PATH=%s\n' "$(cygpath -aw "$prod")" >> "$env_file"
+          printf 'ZECRESCUE_DIAGNOSTIC_PATCH_PATH=%s\n' "$(cygpath -aw "$diag")" >> "$env_file"
+          printf 'ZECRESCUE_PRODUCTION_PATCH_SHA256=%s\n' "$prod_sha" >> "$env_file"
+          printf 'ZECRESCUE_DIAGNOSTIC_PATCH_SHA256=%s\n' "$diag_sha" >> "$env_file"
+          echo "Production patch SHA-256: $prod_sha"
+          echo "Diagnostic patch SHA-256: $diag_sha"
+
+      - name: Verify exact pins and apply diagnostic-only changes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceRoot = Join-Path $env:GITHUB_WORKSPACE 'upstream/zingo-pc'
+          $expectedCommit = '4ce0368254150d305b5ac50e3a7f8d536ef7bc47'
+          $expectedLock = '557f02c09424ad518f84d83db64e98fe3275696d98cf9fe42f646407e1af2cc7'
+          $expectedZingolib = '7a542ce4a6b14d83bd0108ff3e6c5d8d4c8c71a8'
+          $prodPath = $env:ZECRESCUE_PRODUCTION_PATCH_PATH
+          $diagPath = $env:ZECRESCUE_DIAGNOSTIC_PATCH_PATH
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $prodPath).Hash.ToLowerInvariant() -ne $env:ZECRESCUE_PRODUCTION_PATCH_SHA256) { throw 'Audited production patch bytes changed.' }
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $diagPath).Hash.ToLowerInvariant() -ne $env:ZECRESCUE_DIAGNOSTIC_PATCH_SHA256) { throw 'Diagnostic patch bytes changed.' }
+          $actualCommit = (& git -C $sourceRoot rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualCommit -ne $expectedCommit) { throw 'Unexpected Zingo PC source commit.' }
+          $lockPath = Join-Path $sourceRoot 'native/Cargo.lock'
+          $lockBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $lockPath).Hash.ToLowerInvariant()
+          if ($lockBefore -ne $expectedLock) { throw 'Unexpected native/Cargo.lock hash.' }
+          if (-not (Select-String -LiteralPath (Join-Path $sourceRoot 'native/Cargo.toml') -SimpleMatch $expectedZingolib -Quiet)) { throw 'Unexpected Zingolib pin.' }
+          & git -C $sourceRoot apply --check $prodPath
+          if ($LASTEXITCODE -ne 0) { throw 'Audited production patch does not apply.' }
+          & git -C $sourceRoot apply $prodPath
+          if ($LASTEXITCODE -ne 0) { throw 'Applying audited production patch failed.' }
+          & git -C $sourceRoot apply --reverse --check $prodPath
+          if ($LASTEXITCODE -ne 0) { throw 'Audited production patch reverse check failed.' }
+          $productionSource = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'native/src/lib.rs')
+          & git -C $sourceRoot apply --check $diagPath
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic patch does not apply after the production patch.' }
+          & git -C $sourceRoot apply $diagPath
+          if ($LASTEXITCODE -ne 0) { throw 'Applying diagnostic patch failed.' }
+          & git -C $sourceRoot apply --reverse --check $diagPath
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic patch reverse check failed.' }
+          & git -C $sourceRoot diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'Combined native source diff has whitespace errors.' }
+          $changed = @(& git -C $sourceRoot diff --name-only)
+          if ($changed.Count -ne 1 -or $changed[0] -ne 'native/src/lib.rs') { throw 'Patch changed an unexpected file.' }
+          $nativeSource = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'native/src/lib.rs')
+          $start = $nativeSource.IndexOf('fn init_from_b64(mut cx: FunctionContext) -> JsResult<JsString> {')
+          $end = $nativeSource.IndexOf("`nfn write_to_path(", $start)
+          $prodStart = $productionSource.IndexOf('fn init_from_b64(mut cx: FunctionContext) -> JsResult<JsString> {')
+          $prodEnd = $productionSource.IndexOf("`nfn write_to_path(", $prodStart)
+          if ($start -lt 0 -or $end -lt 0 -or $prodStart -lt 0 -or $prodEnd -lt 0) { throw 'Could not isolate init_from_b64 for patch-scope validation.' }
+          if ($nativeSource.Substring(0, $start) -ne $productionSource.Substring(0, $prodStart) -or $nativeSource.Substring($end) -ne $productionSource.Substring($prodEnd)) { throw 'Diagnostic patch changed source outside init_from_b64.' }
+          $initFunction = $nativeSource.Substring($start, $end - $start)
+          $tags = @('INIT_CONFIG_CONSTRUCT','INIT_WALLET_CONFIG_BUILD','INIT_LIGHTCLIENT_NEW','INIT_WALLET_KIND_READ','INIT_SAVE_TASK','INIT_STORE_CLIENT','INIT_RECOVERY_DATA')
+          foreach ($tag in $tags) { if (-not $initFunction.Contains($tag)) { throw "Missing diagnostic stage tag: $tag" } }
+          if (-not $nativeSource.Contains('wallet.generate_transparent_address(AccountId::ZERO, true)') -or -not $nativeSource.Contains('wallet.generate_transparent_address(AccountId::ZERO, false)')) { throw 'Reviewed strict/allow-gap receiver methods were altered or omitted.' }
+          if (-not $nativeSource.Contains('transparent_address_discovery: TransparentAddressDiscovery::default()')) { throw 'Reviewed default discovery behavior is missing.' }
+          if (-not $nativeSource.Contains('lightclient.save_task().await')) { throw 'Existing save behavior is missing.' }
+          $lockAfter = (Get-FileHash -Algorithm SHA256 -LiteralPath $lockPath).Hash.ToLowerInvariant()
+          if ($lockAfter -ne $expectedLock) { throw 'Cargo.lock changed while applying patches.' }
+          Write-Output ('Verified source commit: ' + $actualCommit)
+          Write-Output ('Verified Cargo.lock SHA-256: ' + $lockAfter)
+          Write-Output 'Production and diagnostic patches apply in order; diagnostic diff is confined to init_from_b64.'
+
+      - name: Install pinned Yarn and validate MSVC
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm install --global yarn@1.22.22
+          if ($LASTEXITCODE -ne 0) { throw 'Installing pinned Yarn Classic failed.' }
+          if ((node --version).Trim() -ne 'v22.18.0') { throw 'Unexpected Node.js version.' }
+          if ((yarn --version).Trim() -ne '1.22.22') { throw 'Unexpected Yarn version.' }
+          if ((protoc --version).Trim() -notmatch '^libprotoc 31.1$') { throw 'Unexpected protoc version.' }
+          if (-not [Environment]::Is64BitOperatingSystem) { throw 'Runner is not x64.' }
+          cmake --version
+          if ($LASTEXITCODE -ne 0) { throw 'Required CMake is unavailable.' }
+          $compiler = Get-Command cl.exe -CommandType Application -ErrorAction Stop
+          if ([string]::IsNullOrWhiteSpace($compiler.Source)) { throw 'MSVC compiler is unavailable.' }
+          $probeRoot = Join-Path $env:RUNNER_TEMP ('zecrescue-msvc-probe-' + [Guid]::NewGuid().ToString('N'))
+          try {
+            New-Item -ItemType Directory -Path $probeRoot | Out-Null
+            $sourcePath = Join-Path $probeRoot 'probe.c'
+            $objectPath = Join-Path $probeRoot 'probe.obj'
+            [IO.File]::WriteAllText($sourcePath, 'int main(void) { return 0; }', [Text.UTF8Encoding]::new($false))
+            & $compiler.Source /nologo /c "/Fo$objectPath" $sourcePath
+            if ($LASTEXITCODE -ne 0) { throw 'Disposable MSVC compile probe failed.' }
+            if (-not (Test-Path -LiteralPath $objectPath -PathType Leaf)) { throw 'MSVC probe object is missing.' }
+          } finally {
+            if (Test-Path -LiteralPath $probeRoot) { Remove-Item -LiteralPath $probeRoot -Recurse -Force }
+          }
+
+      - name: Build diagnostic Windows x64 native addon
+        shell: pwsh
+        env:
+          CI: 'true'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceRoot = Join-Path $env:GITHUB_WORKSPACE 'upstream/zingo-pc'
+          Push-Location $sourceRoot
+          try {
+            yarn install --frozen-lockfile --non-interactive --ignore-scripts
+            if ($LASTEXITCODE -ne 0) { throw 'Frozen dependency installation failed.' }
+            yarn neon-win-x64
+            if ($LASTEXITCODE -ne 0) { throw 'Diagnostic Windows x64 native build failed.' }
+          } finally {
+            Pop-Location
+          }
+          $nativePath = Join-Path $sourceRoot 'src/native.node'
+          if (-not (Test-Path -LiteralPath $nativePath -PathType Leaf)) { throw 'Diagnostic build did not create native.node.' }
+          $lockHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $sourceRoot 'native/Cargo.lock')).Hash.ToLowerInvariant()
+          if ($lockHash -ne '557f02c09424ad518f84d83db64e98fe3275696d98cf9fe42f646407e1af2cc7') { throw 'Cargo.lock changed during build.' }
+          & git -C $sourceRoot diff --exit-code -- package.json yarn.lock native/Cargo.toml native/Cargo.lock
+          if ($LASTEXITCODE -ne 0) { throw 'Build modified a package manifest or lockfile.' }
+          $bytes = [IO.File]::ReadAllBytes($nativePath)
+          if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) { throw 'native.node is not a Windows PE binary.' }
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+          if ($peOffset -lt 0 -or $peOffset + 6 -gt $bytes.Length -or $bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or $bytes[$peOffset + 2] -ne 0 -or $bytes[$peOffset + 3] -ne 0) { throw 'native.node PE header is invalid.' }
+          if ([BitConverter]::ToUInt16($bytes, $peOffset + 4) -ne 0x8664) { throw 'native.node is not x86-64.' }
+          Push-Location $sourceRoot
+          try {
+            $version = (& node -e "const n=require('./src/native.node'); if(typeof n.get_version!=='function')process.exit(2); process.stdout.write(n.get_version());")
+            if ($LASTEXITCODE -ne 0 -or $version.Trim() -ne 'zl_7a542') { throw 'Diagnostic native runtime version mismatch.' }
+          } finally {
+            Pop-Location
+          }
+          $nativeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $nativePath).Hash.ToLowerInvariant()
+          $artifactRoot = Join-Path $env:RUNNER_TEMP ('zecrescue-init-diagnostic-' + $env:GITHUB_RUN_ID)
+          New-Item -ItemType Directory -Path $artifactRoot | Out-Null
+          Copy-Item -LiteralPath $nativePath -Destination (Join-Path $artifactRoot 'native.node')
+          Copy-Item -LiteralPath $env:ZECRESCUE_PRODUCTION_PATCH_PATH -Destination (Join-Path $artifactRoot 'production-audited.patch')
+          Copy-Item -LiteralPath $env:ZECRESCUE_DIAGNOSTIC_PATCH_PATH -Destination (Join-Path $artifactRoot 'diagnostic.patch')
+          $finalDiff = (& git -C $sourceRoot diff -- native/src/lib.rs) | Out-String
+          [IO.File]::WriteAllText((Join-Path $artifactRoot 'final-native.diff'), $finalDiff, [Text.UTF8Encoding]::new($false))
+          $provenance = [ordered]@{
+            zecrescueBranchCommit = (& git -C $env:GITHUB_WORKSPACE rev-parse HEAD).Trim()
+            zingoPcCommit = '4ce0368254150d305b5ac50e3a7f8d536ef7bc47'
+            zingolibRevision = '7a542ce4a6b14d83bd0108ff3e6c5d8d4c8c71a8'
+            cargoLockSha256 = $lockHash
+            productionPatchSha256 = $env:ZECRESCUE_PRODUCTION_PATCH_SHA256
+            diagnosticPatchSha256 = $env:ZECRESCUE_DIAGNOSTIC_PATCH_SHA256
+            diagnosticNativeSha256 = $nativeHash
+            nodeVersion = (node --version).Trim()
+            rustVersion = (rustc --version).Trim()
+            cargoVersion = (cargo --version).Trim()
+            protocVersion = (protoc --version).Trim()
+            yarnVersion = (yarn --version).Trim()
+            label = 'DIAGNOSTIC_ONLY_NOT_APPROVED_FOR_PRODUCTION'
+          }
+          $json = $provenance | ConvertTo-Json -Depth 5
+          [IO.File]::WriteAllText((Join-Path $artifactRoot 'provenance.json'), $json, [Text.UTF8Encoding]::new($false))
+          Write-Output ('Diagnostic native SHA-256: ' + $nativeHash)
+          Write-Output ('Diagnostic patch SHA-256: ' + $env:ZECRESCUE_DIAGNOSTIC_PATCH_SHA256)
+
+      - name: Upload diagnostic-only native artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: DIAGNOSTIC-ONLY-zingo-init-native-${{ github.sha }}
+          path: ${{ runner.temp }}/zecrescue-init-diagnostic-${{ github.run_id }}/
+          if-no-files-found: error
+          retention-days: 7
