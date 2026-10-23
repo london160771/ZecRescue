@@ -132,6 +132,7 @@ async function createHarness(options: {
   walletName?: string;
   stateDir?: string;
   native?: FakeZingoNative;
+  verifyNativeFile?: (path: string) => Promise<boolean>;
   registeredChains?: Array<"base" | "arbitrum">;
   agentSessionId?: string;
 } = {}) {
@@ -163,7 +164,7 @@ async function createHarness(options: {
     shieldingRuntimeVerified: options.shieldingRuntimeVerified ?? false
   }, {
     loadAddon: () => native,
-    verifyNativeFile: async () => true,
+    verifyNativeFile: options.verifyNativeFile ?? (async () => true),
     isZingoPcRunning: async () => {
       if (options.processCheckFails) throw new Error("process lookup failed");
       return options.isRunning ?? false;
@@ -207,6 +208,47 @@ afterEach(async () => {
 });
 
 describe("Zingo PC native wallet boundary", () => {
+  it("accepts the pinned base API when file integrity and runtime version pass without optional clear_proposal", async () => {
+    const verifyNativeFile = vi.fn(async () => true);
+    const { provider, native } = await createHarness({ registeredChains: ["base"], dedicated: true, shieldingRuntimeVerified: true, verifyNativeFile });
+    delete (native as unknown as Record<string, unknown>).clear_proposal;
+
+    const capabilities = await provider.openWallet(true);
+
+    expect(verifyNativeFile).toHaveBeenCalledOnce();
+    expect(verifyNativeFile).toHaveBeenCalledWith(expect.stringMatching(/native\.node$/i));
+    expect(native.get_version).toHaveBeenCalled();
+    expect(capabilities).toMatchObject({ zingoVersion: "zl_7a542", walletOpen: true, canGenerateTransparentReceiver: true, canMonitorReceiver: true });
+    expect(capabilities.canPrepareShielding).toBe(false);
+    expect(capabilities.canSignLocally).toBe(false);
+    expect(capabilities.canBroadcast).toBe(false);
+    expect(capabilities.limitations.join(" ")).toContain("ZINGO_SHIELDING_API_UNAVAILABLE");
+    expect(native.wallet_exists).toHaveBeenCalledOnce();
+    expect(native.init_from_b64).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the native integrity check authoritative when clear_proposal is absent", async () => {
+    const verifyNativeFile = vi.fn(async () => false);
+    const { provider, native } = await createHarness({ verifyNativeFile });
+    delete (native as unknown as Record<string, unknown>).clear_proposal;
+
+    await expect(provider.openWallet(true)).rejects.toMatchObject({ code: "ZINGO_NATIVE_RUNTIME_INTEGRITY_MISMATCH" });
+
+    expect(verifyNativeFile).toHaveBeenCalledOnce();
+    expect(native.get_version).not.toHaveBeenCalled();
+    expect(native.wallet_exists).not.toHaveBeenCalled();
+  });
+
+  it("still rejects a missing required base API method before wallet access", async () => {
+    const { provider, native } = await createHarness();
+    delete (native as unknown as Record<string, unknown>).get_transparent_addresses;
+
+    await expect(provider.openWallet(true)).rejects.toMatchObject({ code: "ZINGO_NATIVE_RUNTIME_API_MISMATCH" });
+    expect(native.wallet_exists).not.toHaveBeenCalled();
+    expect(native.init_from_b64).not.toHaveBeenCalled();
+    expect(native.run_sync).not.toHaveBeenCalled();
+  });
+
   it("rejects the original native addon before wallet access when the allow-gap export is absent", async () => {
     const { provider, native } = await createHarness();
     delete (native as unknown as Record<string, unknown>).create_new_transparent_address_allow_gap;
@@ -774,6 +816,56 @@ describe("Zingo PC native wallet boundary", () => {
     expect((await provider.getCapabilities()).canPrepareShielding).toBe(false);
     await expect(provider.prepareShielding("all_eligible_transparent", true)).rejects.toMatchObject({ code: "SHIELDING_RUNTIME_NOT_VERIFIED" });
     expect(native.shield).not.toHaveBeenCalled();
+    expect(native.confirm).not.toHaveBeenCalled();
+  });
+
+  it("blocks shielding before sync or proposal work when the optional cleanup API is absent", async () => {
+    const { provider, native } = await createHarness({ registeredChains: ["base", "arbitrum"], dedicated: true, shieldingRuntimeVerified: true });
+    const clearProposal = native.clear_proposal;
+    delete (native as unknown as Record<string, unknown>).clear_proposal;
+    await connect(provider);
+    const stopSyncCalls = native.stop_sync.mock.calls.length;
+    const runSyncCalls = native.run_sync.mock.calls.length;
+
+    await expect(provider.prepareShielding("all_eligible_transparent", true)).rejects.toMatchObject({ code: "ZINGO_SHIELDING_API_UNAVAILABLE" });
+
+    expect(native.stop_sync).toHaveBeenCalledTimes(stopSyncCalls);
+    expect(native.run_sync).toHaveBeenCalledTimes(runSyncCalls);
+    expect(native.get_balance).not.toHaveBeenCalled();
+    expect(native.shield).not.toHaveBeenCalled();
+    expect(native.confirm).not.toHaveBeenCalled();
+    expect(clearProposal).not.toHaveBeenCalled();
+  });
+
+  it("does not create a shield proposal when proposal cleanup fails", async () => {
+    const { provider, native } = await createHarness({ registeredChains: ["base", "arbitrum"], shieldingRuntimeVerified: true });
+    await connect(provider);
+    native.clear_proposal.mockRejectedValueOnce(new Error("fixture cleanup failure"));
+
+    await expect(provider.prepareShielding("all_eligible_transparent", true)).rejects.toMatchObject({ code: "ZINGO_SHIELD_PROPOSAL_CLEANUP_FAILED" });
+    expect(native.shield).not.toHaveBeenCalled();
+    expect(native.confirm).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { operation: "approve", expired: false },
+    { operation: "status", expired: false },
+    { operation: "approve", expired: true },
+    { operation: "status", expired: true }
+  ] as const)("fails safely if clear_proposal is absent for an active %s plan (expired=$expired)", async ({ operation, expired }) => {
+    let now = 3_000_000;
+    const { provider, native } = await createHarness({ registeredChains: ["base", "arbitrum"], shieldingRuntimeVerified: true, now: () => now });
+    const clearProposal = native.clear_proposal;
+    await connect(provider);
+    const plan = await provider.prepareShielding("all_eligible_transparent", true);
+    delete (native as unknown as Record<string, unknown>).clear_proposal;
+    if (expired) now += 2 * 60 * 1000 + 1;
+
+    const result = operation === "approve"
+      ? provider.approveShielding(plan.preparationId, plan.preparationHash, true)
+      : provider.getShieldStatus(plan.preparationId, true);
+    await expect(result).rejects.toMatchObject({ code: "ZINGO_SHIELDING_API_UNAVAILABLE" });
+    expect(clearProposal).toHaveBeenCalledOnce();
     expect(native.confirm).not.toHaveBeenCalled();
   });
 

@@ -68,6 +68,7 @@ export async function validateExistingWalletDirectory(baseDir: string, walletNam
 }
 
 type MaybePromise<T> = T | Promise<T>;
+type ShieldingNativeApi = ZingoNativeApi & { clear_proposal(): MaybePromise<unknown> };
 
 /** Only this fixed subset is ever invoked. The raw addon is never returned over HTTP. */
 export type ZingoNativeApi = {
@@ -93,7 +94,7 @@ export type ZingoNativeApi = {
   get_value_transfers(): MaybePromise<unknown>;
   shield(): MaybePromise<unknown>;
   confirm(): MaybePromise<unknown>;
-  clear_proposal(): MaybePromise<unknown>;
+  clear_proposal?(): MaybePromise<unknown>;
 };
 
 export type NativeWalletSettings = {
@@ -184,6 +185,7 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
     }
     const compatible = zingoVersion === supportedZingolibVersion;
     const walletReady = runtimeLoaded && compatible && configComplete && this.walletOpen;
+    const shieldingApiAvailable = this.hasShieldingApi(native);
     const receiverCreationBlocker = !localReceiverStateAvailable
       ? "LOCAL_RECEIVER_STATE_UNAVAILABLE"
       : this.receiverMutationIntentUnresolved
@@ -198,6 +200,7 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
     else if (!compatible) limitations.push(`Only ${supportedZingolibVersion} is enabled; detected ${zingoVersion ?? "unknown"}.`);
     if (!configComplete) limitations.push("Configure an existing Mainnet Zingo PC wallet locally; the agent never creates or imports a wallet.");
     else if (!this.walletOpen) limitations.push("The wallet has not been opened by this agent. Connect explicitly after closing Zingo PC.");
+    if (runtimeLoaded && !shieldingApiAvailable) limitations.push("ZINGO_SHIELDING_API_UNAVAILABLE: Shielding is unavailable because this pinned native runtime does not expose the required proposal-cleanup API.");
     if (walletReady && !this.settings.recoveryWalletDedicated) limitations.push("Set the local dedicated-Recovery-Vault acknowledgement before shielding can be prepared.");
     if (walletReady && this.settings.recoveryWalletDedicated && !this.settings.shieldingRuntimeVerified) limitations.push("Shielding remains disabled until the owner verifies this local Zingo wallet runtime and enables it in ignored .env.");
     if (this.receiverMutationIntentUnresolved) limitations.unshift("An interrupted receiver operation must be reconciled against the saved wallet before any receiver creation can continue.");
@@ -216,9 +219,9 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
       receiverCreationBlocker,
       canMonitorReceiver: walletReady,
       canGenerateIronwoodReceiver: false,
-      canPrepareShielding: walletReady && this.canShield(),
-      canSignLocally: walletReady && this.canShield(),
-      canBroadcast: walletReady && this.canShield(),
+      canPrepareShielding: walletReady && shieldingApiAvailable && this.canShield(),
+      canSignLocally: walletReady && shieldingApiAvailable && this.canShield(),
+      canBroadcast: walletReady && shieldingApiAvailable && this.canShield(),
       canPrepareWithdrawal: false,
       shieldingScope: walletReady ? "account_level" : null,
       privacyDisclosure,
@@ -455,10 +458,11 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
     if (!this.settings.shieldingRuntimeVerified) throw new AgentError(403, "SHIELDING_RUNTIME_NOT_VERIFIED");
     return this.serialized(async () => {
       if (!this.settings.recoveryWalletDedicated) throw new AgentError(403, "DEDICATED_RECOVERY_WALLET_REQUIRED");
+      const native = await this.requireOpenWallet();
+      this.requireShieldingApi(native);
       if (this.activePlan && this.activePlan.state === "awaiting_approval" && this.now() < Date.parse(this.activePlan.expiresAt)) {
         throw new AgentError(409, "SHIELD_APPROVAL_ALREADY_PENDING");
       }
-      const native = await this.requireOpenWallet();
       await this.assertZingoPcClosed();
       await this.loadPathRegistry();
       await this.stopSync(native);
@@ -485,12 +489,12 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
       const totalInput = sourceAmounts.reduce((total, source) => total + BigInt(source.amountZatoshis), 0n);
       if (totalInput !== balanceBefore.confirmedTransparent) throw new AgentError(409, "UNASSIGNED_TRANSPARENT_FUNDS_PRESENT");
 
-      await native.clear_proposal();
+      await this.clearShieldProposal(native);
       const proposal = parseNativeJsonRecord(await native.shield(), "ZINGO_SHIELD_PROPOSAL_UNSUPPORTED");
       if (proposal.error) throw new AgentError(409, "ZINGO_SHIELD_PROPOSAL_REFUSED");
       const fee = parseInteger(proposal.fee, "ZINGO_SHIELD_FEE_UNSUPPORTED");
       if (fee <= 0n || fee >= totalInput) {
-        await Promise.resolve(native.clear_proposal()).catch(() => undefined);
+        await this.clearShieldProposal(native);
         throw new AgentError(409, "ZINGO_SHIELD_AMOUNT_INVALID");
       }
       const balanceAfterProposal = await this.getWalletBalance(native);
@@ -499,7 +503,7 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
         balanceAfterProposal.confirmedTransparent !== balanceBefore.confirmedTransparent ||
         balanceAfterProposal.confirmedIronwood !== balanceBefore.confirmedIronwood
       ) {
-        await Promise.resolve(native.clear_proposal()).catch(() => undefined);
+        await this.clearShieldProposal(native);
         throw new AgentError(409, "SHIELD_PROPOSAL_CHANGED_WALLET_STATE");
       }
 
@@ -548,11 +552,12 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
       }
       if (plan.status !== "awaiting_approval") throw new AgentError(409, "SHIELD_PREPARATION_ALREADY_USED");
       if (this.now() >= Date.parse(plan.expiresAt)) {
-        await Promise.resolve((await this.requireOpenWallet()).clear_proposal()).catch(() => undefined);
+        await this.clearShieldProposal(await this.requireOpenWallet());
         plan.status = "expired";
         throw new AgentError(410, "SHIELD_PREPARATION_EXPIRED");
       }
       const native = await this.requireOpenWallet();
+      this.requireShieldingApi(native);
       await this.assertZingoPcClosed();
       // Mark before crossing the native boundary; a lost response must never trigger an automatic replay.
       plan.status = "broadcast_outcome_unknown";
@@ -578,9 +583,13 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
     return this.serialized(async () => {
       const plan = this.activePlan;
       if (!plan || plan.preparationId !== preparationId) throw new AgentError(404, "SHIELD_PREPARATION_NOT_FOUND");
-      if (plan.status === "awaiting_approval" && this.now() >= Date.parse(plan.expiresAt)) {
-        await Promise.resolve((await this.requireOpenWallet()).clear_proposal()).catch(() => undefined);
-        plan.status = "expired";
+      if (plan.status === "awaiting_approval") {
+        const native = await this.requireOpenWallet();
+        this.requireShieldingApi(native);
+        if (this.now() >= Date.parse(plan.expiresAt)) {
+          await this.clearShieldProposal(native);
+          plan.status = "expired";
+        }
       }
       if (plan.status === "submitted" || plan.status === "pending") {
         const native = await this.requireOpenWallet();
@@ -638,6 +647,23 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
     return this.settings.recoveryWalletDedicated && this.settings.shieldingRuntimeVerified && !this.receiverMutationIntentUnresolved;
   }
 
+  private hasShieldingApi(native: ZingoNativeApi | undefined): native is ShieldingNativeApi {
+    return Boolean(native && typeof native.shield === "function" && typeof native.confirm === "function" && typeof native.clear_proposal === "function");
+  }
+
+  private requireShieldingApi(native: ZingoNativeApi): asserts native is ShieldingNativeApi {
+    if (!this.hasShieldingApi(native)) throw new AgentError(503, "ZINGO_SHIELDING_API_UNAVAILABLE");
+  }
+
+  private async clearShieldProposal(native: ZingoNativeApi): Promise<void> {
+    this.requireShieldingApi(native);
+    try {
+      await native.clear_proposal();
+    } catch {
+      throw new AgentError(503, "ZINGO_SHIELD_PROPOSAL_CLEANUP_FAILED");
+    }
+  }
+
   private async requireConfiguration(): Promise<void> {
     if (!this.settings.nativePath) throw new AgentError(503, "ZINGO_NATIVE_RUNTIME_NOT_CONFIGURED");
     if (!this.hasWalletConfiguration()) throw new AgentError(503, "ZINGO_WALLET_CONFIGURATION_REQUIRED");
@@ -676,7 +702,7 @@ export class ZingoPcNativeWalletProvider implements ZcashWalletProvider {
     for (const method of [
       "get_version", "set_wallet_base_dir", "wallet_exists", "init_from_b64", "wallet_kind", "run_sync", "poll_sync", "stop_sync",
       "deinitialize", "save_wallet_file", "get_transparent_addresses", "create_new_transparent_address", "create_new_transparent_address_allow_gap", "get_spendable_balance_with_address",
-      "get_balance", "get_latest_block_wallet", "get_latest_block_server", "get_ironwood_activation_height", "get_value_transfers", "shield", "confirm", "clear_proposal"
+      "get_balance", "get_latest_block_wallet", "get_latest_block_server", "get_ironwood_activation_height", "get_value_transfers", "shield", "confirm"
     ] as const) {
       if (typeof addon[method] !== "function") throw new AgentError(503, "ZINGO_NATIVE_RUNTIME_API_MISMATCH");
     }

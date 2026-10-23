@@ -60,7 +60,7 @@ describe("fixed native API boundary", () => {
       "content-type": "application/json"
     };
 
-    for (const method of ["get_seed", "send", "shield", "confirm", "arbitrary_native_export"]) {
+    for (const method of ["get_seed", "send", "shield", "confirm", "clear_proposal", "arbitrary_native_export"]) {
       const response = await fetch(`${origin}/v1/native/${method}`, { method: "POST", headers, body: "{}" });
       expect(response.status, method).toBe(404);
     }
