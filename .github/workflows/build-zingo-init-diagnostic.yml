@@ -182,7 +182,7 @@ jobs:
           if ([BitConverter]::ToUInt16($bytes, $peOffset + 4) -ne 0x8664) { throw 'native.node is not x86-64.' }
           Push-Location $sourceRoot
           try {
-            $version = (& node -e "const n=require('./src/native.node'); if(typeof n.get_version!=='function')process.exit(2); process.stdout.write(n.get_version());")
+            $version = (& node -e "const n=require('./src/native.node'); if(typeof n.get_version!=='function')process.exit(2); (async()=>{const v=await n.get_version();if(v!=='zl_7a542')process.exitCode=3;else process.stdout.write(v)})().catch(()=>process.exitCode=4);")
             if ($LASTEXITCODE -ne 0 -or $version.Trim() -ne 'zl_7a542') { throw 'Diagnostic native runtime version mismatch.' }
           } finally {
             Pop-Location
